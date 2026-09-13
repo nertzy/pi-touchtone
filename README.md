@@ -4,6 +4,12 @@ Small, local session messaging for [Pi](https://github.com/earendil-works/pi).
 Find another running agent, send it a message, and keep working—without a broker
 or blocking question-and-answer protocol.
 
+![A main Pi agent dispatches task-list work, receives a changed requirement, and relays it to an implementer while the implementation is running.](./docs/demo.gif)
+
+[Watch the MP4](./docs/demo.mp4). The clean Pi sessions use scripted faux-provider
+responses, a synthetic JavaScript project, and real Touchtone mailbox delivery.
+The implementer applies the update and runs the fixture's two tests.
+
 ## Install
 
 ```sh
