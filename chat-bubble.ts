@@ -1,12 +1,13 @@
 import {
+  type Component,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
-  type Component,
 } from "@earendil-works/pi-tui";
 
-const RESET = "\x1b[0m";
+const ESC = "\x1b";
+const RESET = `${ESC}[0m`;
 
 export type ChatDirection = "incoming" | "outgoing";
 
@@ -34,9 +35,9 @@ interface ChatBubbleTheme {
 }
 
 function backgroundToForeground(background: string): string {
-  return background === "\x1b[49m"
-    ? "\x1b[39m"
-    : background.replace(/^\x1b\[48;/, "\x1b[38;");
+  return background === `${ESC}[49m`
+    ? `${ESC}[39m`
+    : background.replace(new RegExp(`^${ESC}\\[48;`), `${ESC}[38;`);
 }
 
 function bubbleColors(options: ChatBubbleOptions) {
@@ -83,15 +84,24 @@ export class ChatBubble implements Component {
       `${foreground}${background}${line}${RESET}`;
     const paintFill = (line: string): string => `${fill}${line}${RESET}`;
     if (safeWidth < 5) {
-      return wrapTextWithAnsi(stripTerminalSequences(this.options.body), safeWidth)
-        .map((line) => stripTerminalSequences(truncateToWidth(line, safeWidth, "")))
+      return wrapTextWithAnsi(
+        stripTerminalSequences(this.options.body),
+        safeWidth,
+      )
+        .map((line) =>
+          stripTerminalSequences(truncateToWidth(line, safeWidth, "")),
+        )
         .map((line) => align(paint(line), safeWidth, this.options.direction));
     }
-    const bubbleWidth = Math.max(4, Math.min(safeWidth, Math.floor(safeWidth * 0.72)));
+    const bubbleWidth = Math.max(
+      4,
+      Math.min(safeWidth, Math.floor(safeWidth * 0.72)),
+    );
     const contentWidth = Math.max(1, bubbleWidth - 4);
     const body = stripTerminalSequences(this.options.body);
-    const bodyLines = body.split("\n").flatMap((line) =>
-      wrapTextWithAnsi(line || " ", contentWidth));
+    const bodyLines = body
+      .split("\n")
+      .flatMap((line) => wrapTextWithAnsi(line || " ", contentWidth));
     const actualContentWidth = Math.max(1, ...bodyLines.map(visibleWidth));
     const actualBubbleWidth = Math.min(safeWidth, actualContentWidth + 4);
     const labelLines = wrapTextWithAnsi(
@@ -109,8 +119,9 @@ export class ChatBubble implements Component {
       );
     });
 
-    return [...labelLines, top, ...middle, bottom]
-      .map((line) => align(line, safeWidth, this.options.direction));
+    return [...labelLines, top, ...middle, bottom].map((line) =>
+      align(line, safeWidth, this.options.direction),
+    );
   }
 
   invalidate(): void {}
@@ -146,7 +157,10 @@ export class OnDeckIndicator implements Component {
 
   render(width: number): string[] {
     if (this.count === 0) return [];
-    const handsets = Array.from({ length: Math.min(this.count, 5) }, () => "📞").join(" ");
+    const handsets = Array.from(
+      { length: Math.min(this.count, 5) },
+      () => "📞",
+    ).join(" ");
     const overflow = this.count > 5 ? ` +${this.count - 5}` : "";
     const line = `${handsets}${overflow} ${DOTS[this.frame]}`;
     return [this.styleText(truncateToWidth(line, Math.max(1, width), ""))];

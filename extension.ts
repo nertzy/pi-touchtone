@@ -17,15 +17,17 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
+import { type Static, Type } from "typebox";
 
-import {
-  ChatBubble,
-  OnDeckIndicator,
-  renderMailLabel,
-} from "./chat-bubble.ts";
+import { ChatBubble, OnDeckIndicator, renderMailLabel } from "./chat-bubble.ts";
 
-const DEFAULT_ROOT = path.join(os.homedir(), ".local", "state", "pi", "touchtone");
+const DEFAULT_ROOT = path.join(
+  os.homedir(),
+  ".local",
+  "state",
+  "pi",
+  "touchtone",
+);
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 
 export interface TouchtoneSession {
@@ -69,7 +71,9 @@ export function getTouchtonePaths(root = DEFAULT_ROOT): TouchtonePaths {
 
 function requireSessionId(value: string): string {
   if (!SESSION_ID_RE.test(value)) {
-    throw new Error("Recipient must be a valid session id from touchtone list.");
+    throw new Error(
+      "Recipient must be a valid session id from touchtone list.",
+    );
   }
   return value;
 }
@@ -112,16 +116,24 @@ function readJson(file: string): unknown {
 function isSession(value: unknown): value is TouchtoneSession {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<TouchtoneSession>;
-  return typeof record.sessionId === "string" && SESSION_ID_RE.test(record.sessionId)
-    && typeof record.pid === "number" && typeof record.cwd === "string";
+  return (
+    typeof record.sessionId === "string" &&
+    SESSION_ID_RE.test(record.sessionId) &&
+    typeof record.pid === "number" &&
+    typeof record.cwd === "string"
+  );
 }
 
 function isMessage(value: unknown): value is TouchtoneMessage {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<TouchtoneMessage>;
-  return typeof message.id === "string" && isSession(message.sender)
-    && typeof message.recipientSessionId === "string"
-    && typeof message.message === "string" && typeof message.sentAt === "string";
+  return (
+    typeof message.id === "string" &&
+    isSession(message.sender) &&
+    typeof message.recipientSessionId === "string" &&
+    typeof message.message === "string" &&
+    typeof message.sentAt === "string"
+  );
 }
 
 export class TouchtoneStore {
@@ -139,7 +151,10 @@ export class TouchtoneStore {
   }
 
   rosterFile(sessionId: string): string {
-    return path.join(this.paths.sessions, `${requireSessionId(sessionId)}.json`);
+    return path.join(
+      this.paths.sessions,
+      `${requireSessionId(sessionId)}.json`,
+    );
   }
 
   inboxDirectory(sessionId: string): string {
@@ -153,7 +168,8 @@ export class TouchtoneStore {
   unregister(sessionId: string, pid: number): void {
     try {
       const record = readJson(this.rosterFile(sessionId));
-      if (isSession(record) && record.pid === pid) fs.unlinkSync(this.rosterFile(sessionId));
+      if (isSession(record) && record.pid === pid)
+        fs.unlinkSync(this.rosterFile(sessionId));
     } catch {
       // Dead-pid cleanup handles a missing or malformed best-effort roster entry.
     }
@@ -162,7 +178,9 @@ export class TouchtoneStore {
   liveSessions(): TouchtoneSession[] {
     ensurePrivateDirectory(this.paths.sessions);
     const sessions: TouchtoneSession[] = [];
-    for (const entry of fs.readdirSync(this.paths.sessions, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(this.paths.sessions, {
+      withFileTypes: true,
+    })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const file = path.join(this.paths.sessions, entry.name);
       try {
@@ -176,12 +194,18 @@ export class TouchtoneStore {
         // A malformed file is not a session and cannot safely be addressed.
       }
     }
-    return sessions.sort((left, right) =>
-      (left.sessionName ?? "").localeCompare(right.sessionName ?? "")
-      || left.sessionId.localeCompare(right.sessionId));
+    return sessions.sort(
+      (left, right) =>
+        (left.sessionName ?? "").localeCompare(right.sessionName ?? "") ||
+        left.sessionId.localeCompare(right.sessionId),
+    );
   }
 
-  send(sender: TouchtoneSession, recipient: TouchtoneSession, message: string): string {
+  send(
+    sender: TouchtoneSession,
+    recipient: TouchtoneSession,
+    message: string,
+  ): string {
     const mail: TouchtoneMessage = {
       id: crypto.randomUUID(),
       sender,
@@ -190,11 +214,17 @@ export class TouchtoneStore {
       sentAt: new Date().toISOString(),
     };
     const filename = `${mail.sentAt.replaceAll(":", "-")}-${mail.id}.json`;
-    atomicWrite(path.join(this.inboxDirectory(recipient.sessionId), filename), mail);
+    atomicWrite(
+      path.join(this.inboxDirectory(recipient.sessionId), filename),
+      mail,
+    );
     return mail.id;
   }
 
-  consume(sessionId: string, deliver: (message: TouchtoneMessage) => void): void {
+  consume(
+    sessionId: string,
+    deliver: (message: TouchtoneMessage) => void,
+  ): void {
     const directory = this.inboxDirectory(sessionId);
     ensurePrivateDirectory(directory);
     for (const entry of fs.readdirSync(directory).sort()) {
@@ -202,7 +232,8 @@ export class TouchtoneStore {
       const file = path.join(directory, entry);
       try {
         const value = readJson(file);
-        if (!isMessage(value) || value.recipientSessionId !== sessionId) continue;
+        if (!isMessage(value) || value.recipientSessionId !== sessionId)
+          continue;
         deliver(value);
         fs.unlinkSync(file);
       } catch {
@@ -212,11 +243,20 @@ export class TouchtoneStore {
   }
 }
 
-const touchtoneParameters = Type.Object({
-  action: StringEnum(["list", "send"] as const),
-  to: Type.Optional(Type.String({ description: "Exact recipient session id from list (send only)" })),
-  message: Type.Optional(Type.String({ description: "Message to deliver (send only)" })),
-}, { additionalProperties: false });
+const touchtoneParameters = Type.Object(
+  {
+    action: StringEnum(["list", "send"] as const),
+    to: Type.Optional(
+      Type.String({
+        description: "Exact recipient session id from list (send only)",
+      }),
+    ),
+    message: Type.Optional(
+      Type.String({ description: "Message to deliver (send only)" }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 type TouchtoneInput = Static<typeof touchtoneParameters>;
 
@@ -227,16 +267,21 @@ interface TouchtoneDetails {
 }
 
 function rosterHandles(session: TouchtoneSession): string {
-  return [
-    session.cmuxWorkspace && `workspace:${session.cmuxWorkspace}`,
-    session.cmuxSurface && `surface:${session.cmuxSurface}`,
-    session.cmuxPanel && `panel:${session.cmuxPanel}`,
-  ].filter(Boolean).join(" ") || "—";
+  return (
+    [
+      session.cmuxWorkspace && `workspace:${session.cmuxWorkspace}`,
+      session.cmuxSurface && `surface:${session.cmuxSurface}`,
+      session.cmuxPanel && `panel:${session.cmuxPanel}`,
+    ]
+      .filter(Boolean)
+      .join(" ") || "—"
+  );
 }
 
 function wrapToWidth(text: string, width: number): string[] {
   return wrapTextWithAnsi(text, width).map((line) =>
-    visibleWidth(line) <= width ? line : truncateToWidth(line, width, ""));
+    visibleWidth(line) <= width ? line : truncateToWidth(line, width, ""),
+  );
 }
 
 function phonebookSummary(count: number): string {
@@ -265,7 +310,10 @@ function rosterTable(
         Math.max(3, Math.floor(available * 0.1)),
       );
       const remainingWidth = available - idWidth - pidWidth;
-      const nameWidth = Math.min(16, Math.max(4, Math.floor(remainingWidth / 3)));
+      const nameWidth = Math.min(
+        16,
+        Math.max(4, Math.floor(remainingWidth / 3)),
+      );
       const flexibleWidth = remainingWidth - nameWidth;
       const cwdWidth = Math.max(2, Math.floor(flexibleWidth / 3));
       const handlesWidth = flexibleWidth - cwdWidth;
@@ -274,27 +322,33 @@ function rosterTable(
         value + " ".repeat(Math.max(0, cellWidth - visibleWidth(value)));
       const renderRow = (values: string[]): string[] => {
         const cells = values.map((value, index) =>
-          wrapToWidth(value, widths[index]!),
+          wrapToWidth(value, widths[index]),
         );
         const height = Math.max(...cells.map((cell) => cell.length));
-        return Array.from({ length: height }, (_, line) => cells.map((cell, index) =>
-          pad(cell[line] ?? "", widths[index]!),
-        ).join("  "));
+        return Array.from({ length: height }, (_, line) =>
+          cells
+            .map((cell, index) => pad(cell[line] ?? "", widths[index]))
+            .join("  "),
+        );
       };
       const headers = ["SESSION ID", "NAME", "PID", "CWD", "HANDLES"];
       const lines = [
         summary,
         ...renderRow(headers).map(styleHeader),
-        styleDivider(widths.map((cellWidth) => "─".repeat(cellWidth)).join("  ")),
+        styleDivider(
+          widths.map((cellWidth) => "─".repeat(cellWidth)).join("  "),
+        ),
       ];
       for (const session of sessions) {
-        lines.push(...renderRow([
-          session.sessionId,
-          session.sessionName?.trim() || "(unnamed session)",
-          String(session.pid),
-          session.cwd,
-          rosterHandles(session),
-        ]));
+        lines.push(
+          ...renderRow([
+            session.sessionId,
+            session.sessionName?.trim() || "(unnamed session)",
+            String(session.pid),
+            session.cwd,
+            rosterHandles(session),
+          ]),
+        );
       }
       return lines;
     },
@@ -315,21 +369,26 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     const unopened = new Set<string>();
 
     const updateOnDeck = (): void => {
-      if (!context || context.mode !== "tui") return;
+      if (!context) return;
+      if (context.mode !== "tui") return;
       if (unopened.size === 0) {
         context.ui.setWidget("touchtone-on-deck", undefined);
         return;
       }
       const count = unopened.size;
-      context.ui.setWidget("touchtone-on-deck", (tui, theme) => {
-        const indicator = new OnDeckIndicator(
-          () => tui.requestRender(),
-          350,
-          (text) => theme.fg("text", text),
-        );
-        indicator.setCount(count);
-        return indicator;
-      }, { placement: "aboveEditor" });
+      context.ui.setWidget(
+        "touchtone-on-deck",
+        (tui, theme) => {
+          const indicator = new OnDeckIndicator(
+            () => tui.requestRender(),
+            350,
+            (text) => theme.fg("text", text),
+          );
+          indicator.setCount(count);
+          return indicator;
+        },
+        { placement: "aboveEditor" },
+      );
     };
 
     const clearOnDeck = (): void => {
@@ -340,7 +399,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     };
 
     const self = (): TouchtoneSession => {
-      if (!context || !sessionId) throw new Error("Touchtone is not initialized.");
+      if (!context || !sessionId)
+        throw new Error("Touchtone is not initialized.");
       return {
         sessionId,
         sessionName: pi.getSessionName() ?? undefined,
@@ -360,16 +420,20 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       consuming = true;
       try {
         store.consume(sessionId, (value) => {
-          const senderName = value.sender.sessionName?.trim() || "unnamed session";
+          const senderName =
+            value.sender.sessionName?.trim() || "unnamed session";
           unopened.add(value.id);
           updateOnDeck();
           try {
-            pi.sendMessage({
-              customType: "touchtone",
-              content: `📞 Incoming from ${senderName} (${value.sender.sessionId}, pid ${value.sender.pid}):\n${value.message}`,
-              display: true,
-              details: value,
-            }, { deliverAs: "steer", triggerTurn: true });
+            pi.sendMessage(
+              {
+                customType: "touchtone",
+                content: `📞 Incoming from ${senderName} (${value.sender.sessionId}, pid ${value.sender.pid}):\n${value.message}`,
+                display: true,
+                details: value,
+              },
+              { deliverAs: "steer", triggerTurn: true },
+            );
           } catch (error) {
             unopened.delete(value.id);
             updateOnDeck();
@@ -388,21 +452,29 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       poller = undefined;
     };
 
-    pi.registerMessageRenderer<TouchtoneMessage>("touchtone", (message, renderOptions, theme) => {
-      if (!isMessage(message.details)) return undefined;
-      return new ChatBubble({
-        direction: "incoming",
-        label: renderMailLabel("incoming", message.details.sender, renderOptions.expanded),
-        body: message.details.message,
-        theme,
-        styleLabel: (text) => theme.fg("customMessageLabel", text),
-      });
-    });
+    pi.registerMessageRenderer<TouchtoneMessage>(
+      "touchtone",
+      (message, renderOptions, theme) => {
+        if (!isMessage(message.details)) return undefined;
+        return new ChatBubble({
+          direction: "incoming",
+          label: renderMailLabel(
+            "incoming",
+            message.details.sender,
+            renderOptions.expanded,
+          ),
+          body: message.details.message,
+          theme,
+          styleLabel: (text) => theme.fg("customMessageLabel", text),
+        });
+      },
+    );
 
     pi.registerTool<typeof touchtoneParameters, TouchtoneDetails>({
       name: "touchtone",
       label: "📞 Touchtone",
-      description: "List live local Pi sessions or send one a message. Sending requires the exact session id returned by list. Messages identify their sender and steer a busy recipient at the next supported processing point, or wake an idle recipient immediately.",
+      description:
+        "List live local Pi sessions or send one a message. Sending requires the exact session id returned by list. Messages identify their sender and steer a busy recipient at the next supported processing point, or wake an idle recipient immediately.",
       promptSnippet: "List live Pi sessions and send cross-session messages",
       promptGuidelines: [
         "Use touchtone list to get a recipient's exact session id, then touchtone send to communicate with that session.",
@@ -410,32 +482,37 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       parameters: touchtoneParameters,
       renderShell: "self",
       renderCall(params, theme, renderContext) {
-        const message = typeof params?.message === "string"
-          ? params.message
-          : "";
+        const message =
+          typeof params?.message === "string" ? params.message : "";
         if (
-          params?.action !== "send"
-          || !renderContext.isPartial
-          || !message.trim()
+          params?.action !== "send" ||
+          !renderContext.isPartial ||
+          !message.trim()
         ) {
           return new Container();
         }
-        const recipient = typeof params.to === "string" && params.to.trim()
-          ? params.to
-          : "recipient";
+        const recipient =
+          typeof params.to === "string" && params.to.trim()
+            ? params.to
+            : "recipient";
         const composing = new Container();
         composing.addChild(new Spacer(1));
-        composing.addChild(new ChatBubble({
-          direction: "outgoing",
-          label: `📞 ${recipient}`,
-          body: message,
-          styleLabel: (label) => theme.fg("toolOutput", label),
-        }));
+        composing.addChild(
+          new ChatBubble({
+            direction: "outgoing",
+            label: `📞 ${recipient}`,
+            body: message,
+            styleLabel: (label) => theme.fg("toolOutput", label),
+          }),
+        );
         return composing;
       },
       renderResult(result, renderOptions, theme, renderContext) {
         const text = result.content
-          .filter((item): item is { type: "text"; text: string } => item.type === "text")
+          .filter(
+            (item): item is { type: "text"; text: string } =>
+              item.type === "text",
+          )
           .map((item) => item.text)
           .join("\n");
         if (renderContext.isError) return new Text(theme.fg("error", text));
@@ -459,21 +536,26 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             (value) => theme.fg("dim", value),
           );
         }
-        if (renderContext.args.action !== "send" || !result.details?.recipient) {
+        if (
+          renderContext.args.action !== "send" ||
+          !result.details?.recipient
+        ) {
           return new Text(theme.fg("toolOutput", text));
         }
         const sent = theme.fg("muted", "Sent");
         const delivered = new Container();
-        delivered.addChild(new ChatBubble({
-          direction: "outgoing",
-          label: renderMailLabel(
-            "outgoing",
-            result.details.recipient,
-            renderOptions.expanded,
-          ),
-          body: renderContext.args.message ?? "",
-          styleLabel: (label) => theme.fg("toolOutput", label),
-        }));
+        delivered.addChild(
+          new ChatBubble({
+            direction: "outgoing",
+            label: renderMailLabel(
+              "outgoing",
+              result.details.recipient,
+              renderOptions.expanded,
+            ),
+            body: renderContext.args.message ?? "",
+            styleLabel: (label) => theme.fg("toolOutput", label),
+          }),
+        );
         delivered.addChild({
           invalidate() {},
           render(width: number): string[] {
@@ -504,23 +586,34 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           const text = lines.length
             ? `👋 Who’s here? (${lines.length}):\n${lines.join("\n")}`
             : "👋 Who’s here? No sessions.";
-          return { content: [{ type: "text" as const, text }], details: { sessions } };
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { sessions },
+          };
         }
 
         const to = requireSessionId(params.to ?? "");
         const message = params.message?.trim();
-        if (!message) throw new Error("message is required for touchtone send.");
-        const recipient = store.liveSessions().find((record) => record.sessionId === to);
+        if (!message)
+          throw new Error("message is required for touchtone send.");
+        const recipient = store
+          .liveSessions()
+          .find((record) => record.sessionId === to);
         if (!recipient) {
-          throw new Error(`No live session has id ${to}. Run touchtone list again.`);
+          throw new Error(
+            `No live session has id ${to}. Run touchtone list again.`,
+          );
         }
         const messageId = store.send(self(), recipient, message);
-        const recipientName = recipient.sessionName?.trim() || "unnamed session";
+        const recipientName =
+          recipient.sessionName?.trim() || "unnamed session";
         return {
-          content: [{
-            type: "text" as const,
-            text: `📞 Message sent to ${recipientName} (${recipient.sessionId}).`,
-          }],
+          content: [
+            {
+              type: "text" as const,
+              text: `📞 Message sent to ${recipientName} (${recipient.sessionId}).`,
+            },
+          ],
           details: { recipient, messageId },
         };
       },
@@ -528,7 +621,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     pi.on("message_start", async (event) => {
       const message = event.message;
-      if (message.role !== "custom" || message.customType !== "touchtone") return;
+      if (message.role !== "custom" || message.customType !== "touchtone")
+        return;
       const details = message.details;
       if (!isMessage(details) || !unopened.delete(details.id)) return;
       updateOnDeck();

@@ -29,8 +29,13 @@ npm run check
 npm run pack:check
 ```
 
-`npm run check` runs the tests and TypeScript checking. You can also run them
-separately with `npm test` and `npm run typecheck`. The
+`npm run check` runs linting, the tests, and TypeScript checking. You can also
+run them separately with `npm run lint`, `npm test`, and `npm run typecheck`.
+Linting uses Biome, markdownlint-cli2, and
+[actionlint](https://github.com/rhysd/actionlint) 1.7.12. Biome and
+markdownlint-cli2 install with the dev dependencies; install `actionlint`
+separately (on macOS, `brew install actionlint`). Run `npm run lint:fix` to
+apply the Biome and Markdown autofixes. The
 [package manifest](./package.json) lists the development dependencies, and the
 [CI workflow](./.github/workflows/ci.yml) shows the Node.js version used for CI.
 
