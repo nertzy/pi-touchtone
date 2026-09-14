@@ -14,7 +14,11 @@
     "url": "https://github.com/nertzy/pi-touchtone/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=24"
   },
   "keywords": [
     "pi-package",
@@ -39,21 +43,30 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm test && npm run typecheck",
+    "check": "npm run lint && npm test && npm run typecheck",
+    "lint": "npm run lint:biome && npm run lint:markdown && actionlint .github/workflows/*.yml",
+    "lint:biome": "biome check .",
+    "lint:markdown": "markdownlint-cli2 \"**/*.md\" \"#node_modules\" \"#tmp\"",
+    "lint:fix": "biome check --write . && markdownlint-cli2 --fix \"**/*.md\" \"#node_modules\" \"#tmp\"",
     "pack:check": "node scripts/check-package-contents.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@biomejs/biome": "2.5.13",
     "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@earendil-works/pi-tui": "0.85.1",
     "@types/node": "26.0.0",
+    "markdownlint-cli2": "0.23.2",
     "typebox": "1.1.24",
     "typescript": "6.0.2"
+  },
+  "overrides": {
+    "smol-toml": "1.8.0"
   }
 }

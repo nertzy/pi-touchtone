@@ -46,7 +46,7 @@ whose pickup status is unknown; do not automatically resend the latter.
 ### Calling vocabulary
 
 | Presentation | Meaning |
-|---|---|
+| --- | --- |
 | 📞 Connected | The receiver is off hook. |
 | 🎵 On hold | Pending calls, with animated dots and at most five 📞 handsets plus `+N`. |
 | ☎️ Call Waiting | An incoming message has not been picked up, whether the agent is busy or idle. |

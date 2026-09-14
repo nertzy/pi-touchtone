@@ -97,7 +97,7 @@ chooses a smaller interface rather than attempting to replace all of it.
 Comparison checked against **pi-intercom 0.13.0**:
 
 | | Touchtone | pi-intercom |
-|---|---|---|
+| --- | --- | --- |
 | Transport | Shared-file mailboxes; no broker | Local IPC broker |
 | Agent interface | `list` and nonblocking `send` | Also blocking `ask`, reply tracking, and cancellation |
 | Addressing | Exact session IDs | Session names or IDs |
