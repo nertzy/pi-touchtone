@@ -18,9 +18,12 @@ publish an npm release.
 
 - [x] Run the package tests, TypeScript check, and package-content check.
 - [x] Inspect `npm publish --dry-run --ignore-scripts` output without publishing.
-- [ ] Complete review and merge the initial pull request.
-- [ ] Record a fresh demonstration of the renamed interface before restoring
-  demo links. This is not a prerequisite for the first npm release.
+- [x] Complete review and merge the initial pull request (PR #1,
+  `8ac8036`).
+- [x] Record a fresh demonstration of the renamed interface before restoring
+  demo links (PR #3, merged as `07e8d3c`; `docs/demo.gif` and `docs/demo.mp4`).
+  This is not a prerequisite for the first npm release.
+- [ ] Complete live release acceptance against the published package.
 
 ## Publishing
 
@@ -28,8 +31,10 @@ publish an npm release.
 - [ ] Choose and configure the initial publication authorization method.
 - [ ] Configure npm trusted publishing for subsequent GitHub Actions releases
   where supported, without storing a long-lived publishing token.
-- [ ] Add a release workflow that verifies the tag against `package.json`, runs
-  the package checks, and publishes with provenance.
+- [x] Add a release workflow that verifies the tag against `package.json`, runs
+  the package checks, and publishes with provenance (PR #4, merged as
+  `a500a9d`; `.github/workflows/publish.yml`). This records workflow creation,
+  not a successful trusted-publishing run.
 - [ ] Prepare release notes before publication and publish them after npm succeeds.
 - [ ] Obtain explicit release approval, then publish and verify a clean install
   from the registry.

@@ -459,7 +459,6 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         return new ChatBubble({
           direction: "incoming",
           label: renderMailLabel(
-            "incoming",
             message.details.sender,
             renderOptions.expanded,
           ),
@@ -548,7 +547,6 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           new ChatBubble({
             direction: "outgoing",
             label: renderMailLabel(
-              "outgoing",
               result.details.recipient,
               renderOptions.expanded,
             ),
@@ -584,8 +582,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             return `- ${record.sessionId} - ${name} - pid ${record.pid} - ${record.cwd}${handles.length ? ` - ${handles.join(" ")}` : ""}`;
           });
           const text = lines.length
-            ? `👋 Who’s here? (${lines.length}):\n${lines.join("\n")}`
-            : "👋 Who’s here? No sessions.";
+            ? `${phonebookSummary(lines.length)}:\n${lines.join("\n")}`
+            : phonebookSummary(0);
           return {
             content: [{ type: "text" as const, text }],
             details: { sessions },

@@ -279,7 +279,7 @@ test("registers the tool, lists live sessions, and wakes an idle recipient", asy
 
   assert.equal(alice.toolLabel(), "📞 Touchtone");
   const emptyList = await alice.tool({ action: "list" });
-  assert.equal(emptyList.content[0].text, "👋 Who’s here? No sessions.");
+  assert.equal(emptyList.content[0].text, "📒 Phonebook · 0 sessions");
 
   await alice.event("session_start");
   await bob.event("session_start");
@@ -297,7 +297,7 @@ test("registers the tool, lists live sessions, and wakes an idle recipient", asy
   assert.equal(
     list.content[0].text,
     [
-      "👋 Who’s here? (2):",
+      "📒 Phonebook · 2 sessions:",
       `- aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa - Alice - pid ${process.pid} - ${path.join(os.tmpdir(), "Alice")}${handleSuffix}`,
       `- bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb - Bob - pid ${process.pid} - ${path.join(os.tmpdir(), "Bob")}${handleSuffix}`,
     ].join("\n"),
@@ -644,9 +644,9 @@ test("shows exact identities only when bubble details are expanded", () => {
     cwd: "/tmp/alice",
     updatedAt: new Date().toISOString(),
   };
-  assert.equal(renderMailLabel("incoming", sender, false), "📞 Alice");
+  assert.equal(renderMailLabel(sender, false), "📞 Alice");
   assert.equal(
-    renderMailLabel("incoming", sender, true),
+    renderMailLabel(sender, true),
     `📞 Alice (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, pid ${process.pid})`,
   );
 });
@@ -707,7 +707,7 @@ test("keeps unopened mail on deck until its matching custom message starts", asy
   assert.match(result.content[0].text, /Message sent/);
 });
 
-test("clears on-deck mail after Pi discards its pending queue on abort", async (t) => {
+test("clears on-deck mail when SDK reports no pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
@@ -722,7 +722,7 @@ test("clears on-deck mail after Pi discards its pending queue on abort", async (
   await alice.tool({
     action: "send",
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    message: "Queued before abort",
+    message: "Queued before agent end",
   });
   await waitFor(() => bob.steered.length === 1);
   assert.equal(bob.widgetLines().length, 1);
@@ -732,7 +732,7 @@ test("clears on-deck mail after Pi discards its pending queue on abort", async (
   assert.deepEqual(bob.widgetLines(), []);
 });
 
-test("keeps on-deck mail when a programmatic abort leaves it pending", async (t) => {
+test("keeps on-deck mail when SDK reports pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
@@ -747,7 +747,7 @@ test("keeps on-deck mail when a programmatic abort leaves it pending", async (t)
   await alice.tool({
     action: "send",
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    message: "Still pending after abort",
+    message: "Still pending at agent end",
   });
   await waitFor(() => bob.steered.length === 1);
   assert.equal(bob.widgetLines().length, 1);
