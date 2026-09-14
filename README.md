@@ -19,7 +19,21 @@ pi install git:github.com/nertzy/pi-touchtone
 Run `/reload` in existing sessions, or start new ones. Install the package in
 both the sending and receiving sessions' Pi configurations.
 
-## 📒 Phonebook
+## Tool reference
+
+Touchtone ships one tool, `touchtone`, with two actions:
+
+| Argument | `list` | `send` |
+| --- | --- | --- |
+| `action` | Required: `"list"` | Required: `"send"` |
+| `to` | Not used | Required: exact full session ID from `list` |
+| `message` | Not used | Required: nonempty plain-text string |
+
+No other arguments are accepted. `send` trims surrounding message whitespace
+and rejects an empty or whitespace-only message. Session names, shortened IDs,
+and pane/workspace handles are not recipient addresses.
+
+## 📒 Phonebook / list
 
 Ask your agent to list nearby sessions. It uses the `touchtone` tool:
 
@@ -27,13 +41,18 @@ Ask your agent to list nearby sessions. It uses the `touchtone` tool:
 { "action": "list" }
 ```
 
-The compact result shows a session count. Expand it to see exact session IDs,
-names, PIDs, working directories, and available pane/workspace handles in a table.
-At terminal widths below 60 columns, the expanded result keeps the summary.
+The compact result shows a session count (the Phonebook). Expand it to see exact
+session IDs, names, PIDs, working directories, and available pane/workspace
+handles in a table. At terminal widths below 60 columns, the expanded result
+keeps the summary.
 
-## 📞 Send a message
+The model-facing result also uses the Phonebook heading and lists those session
+details. The roster includes the current session.
 
-Copy the exact recipient ID from the roster:
+## 📞 Dialing out / send
+
+Copy the exact full recipient session ID from the Phonebook and supply a
+nonempty message:
 
 ```jsonc
 {
@@ -43,13 +62,28 @@ Copy the exact recipient ID from the roster:
 }
 ```
 
-Incoming messages steer busy sessions at Pi's next supported processing point
-and trigger a turn in idle sessions. They do not interrupt shell commands or
-inject keystrokes.
+The recipient must still appear in the live roster; otherwise `send` fails and
+you should run `list` again.
 
 Reply with another `send`. Sending returns after writing the mailbox file;
 it does **not** wait for the recipient to read, acknowledge, or answer it.
 There is no `ask` action or reply correlation.
+
+## Receiving automatically
+
+There is no `receive` action. With Touchtone loaded, incoming mailbox messages
+are automatically handed to Pi with steering delivery and a requested turn.
+Busy sessions take them up at Pi's next supported processing point; idle
+sessions start a turn. Messages do not interrupt shell commands or inject
+keystrokes. The sender's name and exact session ID accompany the message, so a
+reply uses the same `send` action.
+
+### Follow-on APIs do not ship yet
+
+“Phonebook” and “dialing out” above describe `list` and `send`, not additional
+actions. Proposed `phonebook`, `dial`, `operator` (dial 0), and `callback` APIs,
+alternate-address lookup, and offline “take a message” behavior belong to the
+[follow-on design](./docs/specs/dialing-and-call-lifecycle.md), not this release.
 
 ## Chat bubbles
 

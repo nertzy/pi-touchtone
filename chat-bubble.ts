@@ -18,11 +18,10 @@ export interface ChatIdentity {
 }
 
 export function renderMailLabel(
-  direction: ChatDirection,
   identity: ChatIdentity,
   expanded: boolean,
 ): string {
-  const icon = direction === "incoming" ? "📞" : "📞";
+  const icon = "📞";
   const name = identity.sessionName?.trim() || "unnamed session";
   return expanded
     ? `${icon} ${name} (${identity.sessionId}, pid ${identity.pid})`
