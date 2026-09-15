@@ -1,5 +1,7 @@
 # Dialing and call lifecycle
 
+> **Superseded by:** [docs/specs/2026-09-15-party-line-and-batch-delivery.md](./2026-09-15-party-line-and-batch-delivery.md) - "not a multicast request" constraint only; deterministic one-endpoint resolution otherwise stands
+
 **Status: follow-on design, not implemented by the initial release.**
 
 This document preserves agreed product behavior and separates it from proposals
