@@ -2,6 +2,15 @@
 
 Notable changes to `pi-touchtone` are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed touchtone calls failing when the model pads unused arguments with
+  placeholder values: blank locators are ignored, `to` and `selectors` accept
+  any advertised phonebook value, `list` can filter the roster by locators, and
+  every error ends with an example of a successful call.
+
 ## [0.2.0] - 2026-09-16
 
 ### Added
