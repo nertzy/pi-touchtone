@@ -6,8 +6,9 @@
 
 This document preserves agreed product behavior and separates it from proposals
 that still need decisions. The [initial specification](touchtone.md) describes
-what exists today: the `touchtone` tool with `list` and `send`, a Phonebook
-presentation, chat bubbles, and a pending-message indicator. The full dialing
+what exists today: the `touchtone` tool with `list`, `send`, and selector-based
+`broadcast`, a Phonebook presentation, chat bubbles, and a pending-message
+indicator. The full dialing
 interface below does not ship merely because the package has been renamed.
 
 ## Agreed product behavior

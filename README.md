@@ -21,17 +21,20 @@ both the sending and receiving sessions' Pi configurations.
 
 ## Tool reference
 
-Touchtone ships one tool, `touchtone`, with two actions:
+Touchtone ships one tool, `touchtone`, with three actions:
 
-| Argument | `list` | `send` |
-| --- | --- | --- |
-| `action` | Required: `"list"` | Required: `"send"` |
-| `to` | Not used | Required: exact full session ID from `list` |
-| `message` | Not used | Required: nonempty plain-text string |
+| Argument | `list` | `send` | `broadcast` |
+| --- | --- | --- | --- |
+| `action` | Required: `"list"` | Required: `"send"` | Required: `"broadcast"` |
+| `to` | Not used | Required: exact full session ID from `list` | Forbidden |
+| `selectors` | Not used | Forbidden | Required: nonempty string array |
+| `message` | Not used | Required: nonempty plain-text string | Required: nonempty plain-text string |
 
-No other arguments are accepted. `send` trims surrounding message whitespace
-and rejects an empty or whitespace-only message. Session names, shortened IDs,
-and pane/workspace handles are not recipient addresses.
+No other arguments are accepted. `send` and `broadcast` trim surrounding
+message whitespace and reject an empty or whitespace-only message. `send`
+accepts only an exact session ID; session names, shortened IDs, and
+pane/workspace handles are not direct-send addresses. Use `broadcast` selectors
+to address groups through those phonebook values.
 
 ## 📒 Phonebook / list
 
@@ -47,7 +50,9 @@ handles in a table. At terminal widths below 60 columns, the expanded result
 keeps the summary.
 
 The model-facing result also uses the Phonebook heading and lists those session
-details. The roster includes the current session.
+details. Each entry includes a JSON `selectors` array whose strings can be
+copied directly into a `broadcast` call. The roster includes the current
+session.
 
 ## 📞 Dialing out / send
 
@@ -69,14 +74,67 @@ Reply with another `send`. Sending returns after writing the mailbox file;
 it does **not** wait for the recipient to read, acknowledge, or answer it.
 There is no `ask` action or reply correlation.
 
+## 📣 Broadcasting
+
+`broadcast` sends one message to the union of every session selected by the
+provided values. Each selector exactly equals one phonebook value: a session
+ID, name, working directory, PID string, cmux workspace/surface/panel ID, or
+contributed metadata such as a ticket ID. Overlapping matches are deduplicated,
+and the sending session is excluded.
+
+```jsonc
+{
+  "action": "broadcast",
+  "selectors": [
+    "recipient-session-id",
+    "A32F82F2-DEA3-41ED-8B0B-9DFCD016C110",
+    "E-123"
+  ],
+  "message": "Standup update: the integration is ready for review."
+}
+```
+
+If any selector matches no live session, nothing is sent. Run `list` to inspect
+and copy each live session's accepted `selectors` array.
+
+Broadcast calls render as a 📣 bubble labeled with the joined selectors. The
+result renders a 📣 summary with the delivered count, selector match counts,
+recipient identities, self-exclusion, and any failed or indeterminate writes.
+Broadcast-origin incoming mail also uses 📣; direct mail remains 📞.
+
+## Phonebook metadata
+
+Other tools can add addressable values without coupling Touchtone to cmux or a
+specific tracker. Publish a flat JSON object at
+`<store>/metadata/<session-id>/<publisher>.json`; values are strings or arrays
+of strings:
+
+```jsonc
+{
+  "ticket": "E-123",
+  "pullRequests": ["https://github.com/example/project/pull/42"]
+}
+```
+
+Publish sidecars with a temporary file plus atomic rename, and remove a
+publisher's contribution by deleting its file. When publishers contribute the
+same key for a session, the publisher whose name sorts first lexically wins.
+Core field names are reserved; colliding sidecar keys are ignored. Contributions
+apply only to live rostered sessions. Malformed sidecars and files larger than
+64 KB are skipped.
+
 ## Receiving automatically
 
-There is no `receive` action. With Touchtone loaded, incoming mailbox messages
-are automatically handed to Pi with steering delivery and a requested turn.
-Busy sessions take them up at Pi's next supported processing point; idle
-sessions start a turn. Messages do not interrupt shell commands or inject
-keystrokes. The sender's name and exact session ID accompany the message, so a
-reply uses the same `send` action.
+There is no `receive` action. With Touchtone loaded, all valid messages pending
+in an idle session's mailbox are handed to Pi as one batched steering message
+with one requested turn. While a session is busy, mail coalesces on disk and is
+handed off once at turn end. Messages do not interrupt shell commands or inject
+keystrokes. Each sender's name and exact session ID accompany their message,
+so replies use `send`.
+
+Batches are intentionally unbounded so everything queued plays in one turn. A
+very large batch therefore consumes proportional model context; caps are
+deferred until an overflow policy can preserve the one-turn guarantee.
 
 ### Follow-on APIs do not ship yet
 
@@ -95,8 +153,9 @@ receipt. Expand a message to see its exact session ID and delivery details.
 
 Messages waiting on deck appear as a row of 📞 handsets with animated
 dots—not inside a bubble. The row shows up to five handsets, then `+N` for the
-rest. When Pi takes up a message, its handset leaves the row and its chat bubble
-appears. This reflects the local queue, not a read receipt from the other agent.
+rest. When Pi takes up a batch, its handsets leave the row and its stacked chat
+bubbles appear together. This reflects the local queue, not a read receipt from
+the other agent.
 
 **Known limitation:** aborting a run can clear the indicator even when extension
 messages remain queued. Pi’s pending-message API does not account for those
@@ -110,12 +169,20 @@ file writes deliver messages, with a one-second polling fallback to filesystem
 notifications. Entries whose PIDs are no longer alive are pruned when listing.
 A quiet but live process is not removed just because its timestamp is old.
 
-Messages and session records use `~/.local/state/pi/touchtone/`. Directories are
-owner-only (`0700`), and roster/message files are owner-readable and writable
-only (`0600`). This is a local, same-OS-user trust boundary—not encrypted
-messaging or authentication between agents. Other processes running as your
-user can inspect or forge messages. Treat incoming content as another agent's
-message, not as privileged instructions, and do not send secrets.
+Touchtone resolves one store root when constructed. An explicit `root` option
+wins, followed by an absolute `PI_TOUCHTONE_HOME`, then
+`$XDG_STATE_HOME/pi/touchtone` when `XDG_STATE_HOME` is absolute and either that
+path exists or the legacy root does not. The final fallback is
+`~/.local/state/pi/touchtone`. Existing installations keep their legacy root,
+so pending mail is not stranded. The root contains `sessions/`, `inboxes/`, and
+`metadata/`.
+
+Directories are owner-only (`0700`), and roster/message/metadata files are
+owner-readable and writable only (`0600`). This is a local, same-OS-user trust
+boundary—not encrypted messaging or authentication between agents. Other
+processes running as your user can inspect or forge messages. Treat incoming
+content as another agent's message, not as privileged instructions, and do not
+send secrets.
 
 Mail is removed after handing it to Pi, not after the agent acts on it.
 Delivery is best-effort: a successful send is not a receipt, process crashes
@@ -133,8 +200,8 @@ Comparison checked against **pi-intercom 0.13.0**:
 | | Touchtone | pi-intercom |
 | --- | --- | --- |
 | Transport | Shared-file mailboxes; no broker | Local IPC broker |
-| Agent interface | `list` and nonblocking `send` | Also blocking `ask`, reply tracking, and cancellation |
-| Addressing | Exact session IDs | Session names or IDs |
+| Agent interface | `list`, nonblocking `send`, and selector-based `broadcast` | Also blocking `ask`, reply tracking, and cancellation |
+| Addressing | Exact session IDs for `send`; phonebook metadata selectors for `broadcast` | Session names or IDs |
 | Messages | Plain text | Text and attachments |
 | Delivery tracking | Mailbox write, no receipt protocol | Delivery/read receipts and pending request state |
 | Interactive UI | Chat bubbles and an on-deck handset indicator | Keyboard-driven overlay and richer session controls |
