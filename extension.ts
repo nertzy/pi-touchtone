@@ -958,17 +958,34 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               styleLabel: (label) => theme.fg("toolOutput", label),
             }),
           );
-          const sent = theme.fg("muted", `Sent to ${outcome.delivered}`);
-          delivered.addChild({
-            invalidate() {},
-            render(width: number): string[] {
-              const safeWidth = Math.max(1, width);
-              const clipped = truncateToWidth(sent, safeWidth, "");
-              return [
-                `${" ".repeat(Math.max(0, safeWidth - visibleWidth(clipped)))}${clipped}`,
-              ];
-            },
+          const recipientLines = outcome.recipients.map((recipient) => {
+            const name = recipient.sessionName?.trim() || "unnamed session";
+            return `  ${name} (${recipient.sessionId})`;
           });
+          const summary = [
+            `Delivered to ${outcome.delivered}/${outcome.recipients.length} sessions${outcome.excludedSelf ? " (self excluded)" : ""}`,
+            `Matches: ${Object.entries(outcome.matchedBy)
+              .map(([selector, count]) => `${selector}=${count}`)
+              .join(", ")}`,
+            `Recipients:\n${recipientLines.join("\n")}`,
+          ];
+          if (outcome.failed?.length) {
+            summary.push(
+              `Failed:\n${outcome.failed
+                .map(({ sessionId, error }) => `  ${sessionId}: ${error}`)
+                .join("\n")}`,
+            );
+          }
+          if (outcome.indeterminate?.length) {
+            summary.push(
+              `Indeterminate (mail published, post-commit step failed):\n${outcome.indeterminate
+                .map(({ sessionId, error }) => `  ${sessionId}: ${error}`)
+                .join("\n")}`,
+            );
+          }
+          delivered.addChild(
+            new Text(theme.fg("muted", summary.join("\n")), 1, 0),
+          );
           return delivered;
         }
         if (

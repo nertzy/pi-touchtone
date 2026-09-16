@@ -1014,7 +1014,8 @@ test("renders a compact roster summary and an expanded width-aware table", async
           broadcast: {
             broadcastId: "broadcast-1",
             recipients: sessions,
-            matchedBy: { "workspace-1": 1 },
+            matchedBy: { "workspace-1": 1, "E-123": 1 },
+            excludedSelf: true,
             delivered: 1,
           },
         },
@@ -1025,7 +1026,51 @@ test("renders a compact roster summary and an expanded width-aware table", async
     .map(stripTerminalSequences)
     .join("\n");
   assert.match(broadcastResult, /📣 1 session/);
-  assert.match(broadcastResult, /Sent to 1/);
+  assert.match(broadcastResult, /Delivered to 1\/1 sessions \(self excluded\)/);
+  assert.match(broadcastResult, /Matches: workspace-1=1, E-123=1/);
+  assert.match(
+    broadcastResult,
+    /Recipients:\s+Bob \(bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\)/,
+  );
+
+  const partialBroadcastResult = alice
+    .renderToolResult(
+      {
+        content: [{ type: "text", text: "broadcast partially sent" }],
+        details: {
+          broadcast: {
+            broadcastId: "broadcast-2",
+            recipients: sessions,
+            matchedBy: { "workspace-1": 1 },
+            delivered: 1,
+            failed: [
+              {
+                sessionId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                error: "permission denied",
+              },
+            ],
+            indeterminate: [
+              {
+                sessionId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                error: "wake failed",
+              },
+            ],
+          },
+        },
+      },
+      { action: "broadcast", message: "Hello group" },
+    )
+    .render(120)
+    .map(stripTerminalSequences)
+    .join("\n");
+  assert.match(
+    partialBroadcastResult,
+    /Failed:\s+cccccccc-cccc-cccc-cccc-cccccccccccc: permission denied/,
+  );
+  assert.match(
+    partialBroadcastResult,
+    /Indeterminate \(mail published, post-commit step failed\):\s+dddddddd-dddd-dddd-dddd-dddddddddddd: wake failed/,
+  );
   assert.deepEqual(
     alice.renderToolResult(result, { action: "list" }).render(80),
     ["📒 Phonebook · 1 session"],
