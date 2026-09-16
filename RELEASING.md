@@ -2,12 +2,19 @@
 
 Releases use explicit versions, curated changelog entries, and immutable
 `v<version>` tags. Pushing a matching tag runs
-`.github/workflows/publish.yml`, which publishes through npm trusted publishing
-and then creates a GitHub Release from the matching `CHANGELOG.md` section.
+`.github/workflows/publish.yml`, which stages the release through npm trusted
+publishing (`npm stage publish`), then creates a GitHub Release from the
+matching `CHANGELOG.md` section.
+
+Staging defers publication to a human: the tag push never makes the version
+installable by itself. After the workflow succeeds, approve the staged version
+on npmjs.com (or with `npm stage approve <stage-id>`, which requires 2FA) to
+publish it. Note the GitHub Release is created when the stage succeeds, so it
+can exist briefly before npm approval.
 
 The workflow uses GitHub's OIDC identity and does not require an npm token. It
-uses the npm version bundled with Node 24 and fails before publishing if that
-version is older than the trusted-publishing minimum.
+uses the npm version bundled with Node 24 and fails before staging if that
+version is older than the staged-publishing minimum (npm 11.15.0).
 
 ## Prepare a release
 
@@ -34,9 +41,10 @@ version is older than the trusted-publishing minimum.
 
 The tag push starts the publish workflow. It rejects a tag that differs from
 `package.json`, a tag that does not point at the checked-out commit, and a
-missing or empty changelog section before publishing. After publication
-succeeds, it creates the corresponding GitHub Release using only that version's
-changelog section.
+missing or empty changelog section before staging. After staging succeeds, it
+creates the corresponding GitHub Release using only that version's changelog
+section; the version goes live on npm only when a maintainer approves the
+staged release.
 
 Do not move or reuse a pushed release tag. If a release fails after its tag is
 pushed, fix the problem and release a new version.
@@ -61,7 +69,9 @@ package. Perform the bootstrap in this order:
    OIDC releases publish with provenance.
 
 3. With the package now registered, configure npm trusted publishing for this
-   exact repository and the `publish.yml` workflow filename.
+   exact repository and the `publish.yml` workflow filename. Allow only
+   `npm stage publish` on the trust relationship; keep `npm publish`
+   disabled so every release requires human approval.
 4. Revoke the short-lived bootstrap credential.
 
 After the bootstrap, every future release publishes through OIDC by pushing an

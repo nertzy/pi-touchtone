@@ -29,14 +29,14 @@ jobs:
         run: node scripts/check-release-ref.ts
       - name: Require release notes
         run: node scripts/extract-release-notes.ts "${GITHUB_REF_NAME#v}" > /dev/null
-      - name: Require trusted-publishing npm support
+      - name: Require staged-publishing npm support
         run: |
           npm_version=$(npm --version)
           echo "npm $npm_version"
           node -e '
             const [major, minor, patch] = process.argv[1].split(".").map(Number);
-            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
-              throw new Error("npm " + process.argv[1] + " does not support trusted publishing");
+            if (major < 11 || (major === 11 && minor < 15)) {
+              throw new Error("npm " + process.argv[1] + " does not support staged publishing (requires >= 11.15.0)");
             }
           ' "$npm_version"
       - run: npm ci
@@ -49,7 +49,7 @@ jobs:
           echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
       - run: npm run check
       - run: npm run pack:check
-      - run: npm publish --access public --provenance
+      - run: npm stage publish --access public --provenance
 
   release:
     needs: publish
