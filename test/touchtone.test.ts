@@ -16,7 +16,7 @@ import {
 import {
   ChatBubble,
   OnDeckIndicator,
-  renderMailLabel,
+  renderDialLabel,
 } from "../chat-bubble.ts";
 import {
   createTouchtoneExtension,
@@ -202,7 +202,7 @@ test("phonebook merge is deterministic across publisher collisions", () => {
   assert.deepEqual(store.phonebook()[0].metadata, { tag: ["from-a"] });
 });
 
-test("broadcast fans out one mail per recipient with a shared broadcastId", () => {
+test("broadcast fans out one message per recipient with a shared broadcastId", () => {
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   for (const id of ["alice", "bob", "carol"]) {
@@ -227,14 +227,14 @@ test("broadcast fans out one mail per recipient with a shared broadcastId", () =
     ["bob", "carol"],
   );
   for (const id of ["bob", "carol"]) {
-    const mails = fs.readdirSync(store.inboxDirectory(id));
-    assert.equal(mails.length, 1);
-    const mail = JSON.parse(
-      fs.readFileSync(path.join(store.inboxDirectory(id), mails[0]), "utf8"),
+    const messages = fs.readdirSync(store.inboxDirectory(id));
+    assert.equal(messages.length, 1);
+    const delivered = JSON.parse(
+      fs.readFileSync(path.join(store.inboxDirectory(id), messages[0]), "utf8"),
     );
-    assert.equal(mail.broadcastId, outcome.broadcastId);
-    assert.equal(mail.message, "standup in 5");
-    assert.equal(mail.recipientSessionId, id);
+    assert.equal(delivered.broadcastId, outcome.broadcastId);
+    assert.equal(delivered.message, "standup in 5");
+    assert.equal(delivered.recipientSessionId, id);
   }
   assert.equal(fs.readdirSync(store.inboxDirectory("alice")).length, 0);
 });
@@ -260,7 +260,7 @@ test("broadcast matches every phonebook value, dedupes, and excludes self", () =
   assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 1);
 });
 
-test("broadcast rejects blank selectors without enqueueing mail", () => {
+test("broadcast rejects blank selectors without enqueueing a message", () => {
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   for (const id of ["alice", "bob"]) {
@@ -277,7 +277,7 @@ test("broadcast rejects blank selectors without enqueueing mail", () => {
   }
 });
 
-test("broadcast rejects empty messages without enqueueing mail", () => {
+test("broadcast rejects empty messages without enqueueing a message", () => {
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   for (const id of ["alice", "bob"]) {
@@ -400,7 +400,7 @@ test("broadcast reports per-recipient pre-publication failure without rollback",
   assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 1);
 });
 
-test("atomic mail publication removes its temporary file when chmod fails", () => {
+test("atomic message publication removes its temporary file when chmod fails", () => {
   const store = new TouchtoneStore({ root: temporaryRoot() });
   for (const id of ["alice", "bob"]) {
     store.initialize(id);
@@ -1071,7 +1071,7 @@ test("renders a compact roster summary and an expanded width-aware table", async
   );
   assert.match(
     partialBroadcastResult,
-    /Indeterminate \(mail published, post-commit step failed\):\s+dddddddd-dddd-dddd-dddd-dddddddddddd: wake failed/,
+    /Indeterminate \(call published, post-commit step failed\):\s+dddddddd-dddd-dddd-dddd-dddddddddddd: wake failed/,
   );
   assert.deepEqual(
     alice.renderToolResult(result, { action: "list" }).render(80),
@@ -1161,7 +1161,7 @@ test("renders a compact roster summary and an expanded width-aware table", async
   assert.equal(result.content[0].text, "model-facing roster remains unchanged");
 });
 
-test("two pending mails arrive as one batched message with one turn trigger", async (t) => {
+test("two pending callss arrive as one batched message with one turn trigger", async (t) => {
   const root = temporaryRoot();
   const bobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
   const store = new TouchtoneStore({ root });
@@ -1199,7 +1199,7 @@ test("two pending mails arrive as one batched message with one turn trigger", as
   const details = bob.delivered[0].message.details as {
     messages: TouchtoneMessage[];
   };
-  assert.deepEqual(details.messages.map((mail) => mail.message).sort(), [
+  assert.deepEqual(details.messages.map((entry) => entry.message).sort(), [
     "first",
     "second",
   ]);
@@ -1218,7 +1218,7 @@ test("two pending mails arrive as one batched message with one turn trigger", as
   assert.deepEqual(fs.readdirSync(store.inboxDirectory(bobId)), []);
 });
 
-test("handed-off mail with an unlink failure is not delivered twice", () => {
+test("handed-off message with an unlink failure is not delivered twice", () => {
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   const sender = rosterSession("alice");
@@ -1268,7 +1268,7 @@ test("handed-off mail with an unlink failure is not delivered twice", () => {
   );
 });
 
-test("busy session holds mail until turn_end, then delivers one combined steer", async (t) => {
+test("busy session holds calls until turn_end, then delivers one combined steer", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
@@ -1300,7 +1300,7 @@ test("busy session holds mail until turn_end, then delivers one combined steer",
     messages: TouchtoneMessage[];
   };
   assert.deepEqual(
-    details.messages.map((mail) => mail.message),
+    details.messages.map((entry) => entry.message),
     ["first", "second"],
   );
   assert.deepEqual(
@@ -1528,7 +1528,7 @@ test("uses private atomic storage and rejects path traversal and dead recipients
   await alice.event("session_shutdown");
 });
 
-test("importing the package does not touch the mailbox", () => {
+test("importing the package does not touch the inbox", () => {
   const home = temporaryRoot();
   execFileSync(
     process.execPath,
@@ -1638,9 +1638,9 @@ test("shows exact identities only when bubble details are expanded", () => {
     cwd: "/tmp/alice",
     updatedAt: new Date().toISOString(),
   };
-  assert.equal(renderMailLabel(sender, false), "📞 Alice");
+  assert.equal(renderDialLabel(sender, false), "📞 Alice");
   assert.equal(
-    renderMailLabel(sender, true),
+    renderDialLabel(sender, true),
     `📞 Alice (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, pid ${process.pid})`,
   );
 });
@@ -1668,7 +1668,7 @@ test("renders at most five queued handsets with overflow and disposes animation"
   );
 });
 
-test("keeps unopened mail on deck until its matching custom message starts", async (t) => {
+test("keeps unopened calls on deck until its matching custom message starts", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
@@ -1703,7 +1703,7 @@ test("keeps unopened mail on deck until its matching custom message starts", asy
   assert.match(result.content[0].text, /Message sent/);
 });
 
-test("clears on-deck mail when SDK reports no pending messages at agent end", async (t) => {
+test("clears on-deck calls when SDK reports no pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
@@ -1730,7 +1730,7 @@ test("clears on-deck mail when SDK reports no pending messages at agent end", as
   assert.deepEqual(bob.widgetLines(), []);
 });
 
-test("keeps on-deck mail when SDK reports pending messages at agent end", async (t) => {
+test("keeps on-deck calls when SDK reports pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
   const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
@@ -1928,7 +1928,7 @@ test("incoming and successful outgoing renderers use typed details without hidin
   );
 });
 
-test("a fresh installation uses the default mailbox", () => {
+test("a fresh installation uses the default inbox", () => {
   const home = temporaryRoot();
   const childEnv = { ...process.env };
   delete childEnv.PI_TOUCHTONE_HOME;

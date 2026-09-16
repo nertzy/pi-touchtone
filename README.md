@@ -7,7 +7,7 @@ or blocking question-and-answer protocol.
 ![A main Pi agent dispatches task-list work, receives a changed requirement, and relays it to an implementer while the implementation is running.](./docs/demo.gif)
 
 [Watch the MP4](./docs/demo.mp4). The clean Pi sessions use scripted faux-provider
-responses, a synthetic JavaScript project, and real Touchtone mailbox delivery.
+responses, a synthetic JavaScript project, and real Touchtone call delivery.
 The implementer applies the update and runs the fixture's two tests.
 
 ## Install
@@ -70,13 +70,14 @@ nonempty message:
 The recipient must still appear in the live roster; otherwise `send` fails and
 you should run `list` again.
 
-Reply with another `send`. Sending returns after writing the mailbox file;
+Reply with another `send`. Sending returns after writing the message file;
 it does **not** wait for the recipient to read, acknowledge, or answer it.
 There is no `ask` action or reply correlation.
 
-## 📣 Broadcasting
+## 📣 Party Line
 
-`broadcast` sends one message to the union of every session selected by the
+Party Line is group messaging: the `broadcast` action sends one message to the
+union of every session selected by the
 provided values. Each selector exactly equals one phonebook value: a session
 ID, name, working directory, PID string, cmux workspace/surface/panel ID, or
 contributed metadata such as a ticket ID. Overlapping matches are deduplicated,
@@ -97,10 +98,10 @@ and the sending session is excluded.
 If any selector matches no live session, nothing is sent. Run `list` to inspect
 and copy each live session's accepted `selectors` array.
 
-Broadcast calls render as a 📣 bubble labeled with the joined selectors. The
+Party Line calls render as a 📣 bubble labeled with the joined selectors. The
 result renders a 📣 summary with the delivered count, selector match counts,
 recipient identities, self-exclusion, and any failed or indeterminate writes.
-Broadcast-origin incoming mail also uses 📣; direct mail remains 📞.
+Party-line calls come in with the 📣 glyph; direct dials remain 📞.
 
 ## Phonebook metadata
 
@@ -125,14 +126,14 @@ apply only to live rostered sessions. Malformed sidecars and files larger than
 
 ## Receiving automatically
 
-There is no `receive` action. With Touchtone loaded, all valid messages pending
-in an idle session's mailbox are handed to Pi as one batched steering message
-with one requested turn. While a session is busy, mail coalesces on disk and is
-handed off once at turn end. Messages do not interrupt shell commands or inject
+There is no `receive` action. With Touchtone loaded, every call waiting for
+an idle session rings in as one batched steering message
+with one requested turn. While a session is busy, calls coalesce on disk and
+ring once at turn end. Calls do not interrupt shell commands or inject
 keystrokes. Each sender's name and exact session ID accompany their message,
 so replies use `send`.
 
-Batches are intentionally unbounded so everything queued plays in one turn. A
+Batches are intentionally unbounded so everything waiting plays in one turn. A
 very large batch therefore consumes proportional model context; caps are
 deferred until an overflow policy can preserve the one-turn guarantee.
 
@@ -148,7 +149,7 @@ alternate-address lookup, and offline “take a message” behavior belong to th
 Outgoing messages appear on the right in white on terminal blue; incoming
 messages appear on the left using Pi's theme text and custom-message background
 colors. Sender labels sit outside the bubbles. Outgoing text appears while the
-agent composes the tool call; a successful mailbox write adds “Sent,” not a read
+agent composes the tool call; a successful inbox write adds “Sent,” not a read
 receipt. Expand a message to see its exact session ID and delivery details.
 
 Messages waiting on deck appear as a row of 📞 handsets with animated
@@ -174,7 +175,7 @@ wins, followed by an absolute `PI_TOUCHTONE_HOME`, then
 `$XDG_STATE_HOME/pi/touchtone` when `XDG_STATE_HOME` is absolute and either that
 path exists or the legacy root does not. The final fallback is
 `~/.local/state/pi/touchtone`. Existing installations keep their legacy root,
-so pending mail is not stranded. The root contains `sessions/`, `inboxes/`, and
+so pending calls is not stranded. The root contains `sessions/`, `inboxes/`, and
 `metadata/`.
 
 Directories are owner-only (`0700`), and roster/message/metadata files are
@@ -184,7 +185,7 @@ processes running as your user can inspect or forge messages. Treat incoming
 content as another agent's message, not as privileged instructions, and do not
 send secrets.
 
-Mail is removed after handing it to Pi, not after the agent acts on it.
+Messages are removed after being handed to Pi, not after the agent acts on them.
 Delivery is best-effort: a successful send is not a receipt, process crashes
 can lose a handoff or cause duplicate delivery, and PID reuse can make a stale
 session appear live. Malformed inbox files are retained for manual inspection.
@@ -199,11 +200,11 @@ Comparison checked against **pi-intercom 0.13.0**:
 
 | | Touchtone | pi-intercom |
 | --- | --- | --- |
-| Transport | Shared-file mailboxes; no broker | Local IPC broker |
+| Transport | Shared-file inboxes; no broker | Local IPC broker |
 | Agent interface | `list`, nonblocking `send`, and selector-based `broadcast` | Also blocking `ask`, reply tracking, and cancellation |
 | Addressing | Exact session IDs for `send`; phonebook metadata selectors for `broadcast` | Session names or IDs |
 | Messages | Plain text | Text and attachments |
-| Delivery tracking | Mailbox write, no receipt protocol | Delivery/read receipts and pending request state |
+| Delivery tracking | Inbox write, no receipt protocol | Delivery/read receipts and pending request state |
 | Interactive UI | Chat bubbles and an on-deck handset indicator | Keyboard-driven overlay and richer session controls |
 
 Both can steer busy interactive sessions. Touchtone always requests a turn
