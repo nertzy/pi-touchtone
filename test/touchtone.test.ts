@@ -18,7 +18,11 @@ import {
   OnDeckIndicator,
   renderMailLabel,
 } from "../chat-bubble.ts";
-import { createTouchtoneExtension, TouchtoneStore } from "../extension.ts";
+import {
+  createTouchtoneExtension,
+  resolveStoreRoot,
+  TouchtoneStore,
+} from "../extension.ts";
 
 const roots: string[] = [];
 
@@ -38,6 +42,76 @@ function temporaryRoot(): string {
   roots.push(root);
   return root;
 }
+
+test("resolveStoreRoot prefers the explicit constructor root", () => {
+  const explicit = temporaryRoot();
+  assert.equal(resolveStoreRoot(explicit, {}, temporaryRoot()), explicit);
+});
+
+test("resolveStoreRoot honors an absolute PI_TOUCHTONE_HOME", () => {
+  const override = path.join(temporaryRoot(), "override");
+  const env = { PI_TOUCHTONE_HOME: override, XDG_STATE_HOME: temporaryRoot() };
+  assert.equal(resolveStoreRoot(undefined, env, temporaryRoot()), override);
+});
+
+test("resolveStoreRoot ignores a non-absolute PI_TOUCHTONE_HOME", () => {
+  const home = temporaryRoot();
+  const env = { PI_TOUCHTONE_HOME: "relative/path" };
+  assert.equal(
+    resolveStoreRoot(undefined, env, home),
+    path.join(home, ".local", "state", "pi", "touchtone"),
+  );
+});
+
+test("resolveStoreRoot ignores a non-absolute XDG_STATE_HOME", () => {
+  const home = temporaryRoot();
+  const env = { XDG_STATE_HOME: "relative/path" };
+  assert.equal(
+    resolveStoreRoot(undefined, env, home),
+    path.join(home, ".local", "state", "pi", "touchtone"),
+  );
+});
+
+test("resolveStoreRoot uses XDG_STATE_HOME on a fresh install", () => {
+  const home = temporaryRoot();
+  const xdg = temporaryRoot();
+  assert.equal(
+    resolveStoreRoot(undefined, { XDG_STATE_HOME: xdg }, home),
+    path.join(xdg, "pi", "touchtone"),
+  );
+});
+
+test("resolveStoreRoot keeps the legacy root when it exists and the XDG root does not", () => {
+  const home = temporaryRoot();
+  const legacy = path.join(home, ".local", "state", "pi", "touchtone");
+  fs.mkdirSync(legacy, { recursive: true });
+  assert.equal(
+    resolveStoreRoot(undefined, { XDG_STATE_HOME: temporaryRoot() }, home),
+    legacy,
+  );
+});
+
+test("resolveStoreRoot prefers the XDG root once it exists", () => {
+  const home = temporaryRoot();
+  const xdg = temporaryRoot();
+  fs.mkdirSync(path.join(home, ".local", "state", "pi", "touchtone"), {
+    recursive: true,
+  });
+  const existing = path.join(xdg, "pi", "touchtone");
+  fs.mkdirSync(existing, { recursive: true });
+  assert.equal(
+    resolveStoreRoot(undefined, { XDG_STATE_HOME: xdg }, home),
+    existing,
+  );
+});
+
+test("resolveStoreRoot falls back to the legacy default with no env", () => {
+  const home = temporaryRoot();
+  assert.equal(
+    resolveStoreRoot(undefined, {}, home),
+    path.join(home, ".local", "state", "pi", "touchtone"),
+  );
+});
 
 type HarnessComponent = { render(width: number): string[]; dispose?(): void };
 type HarnessTool = {
@@ -930,6 +1004,9 @@ test("incoming and successful outgoing renderers use typed details without hidin
 
 test("a fresh installation uses the default mailbox", () => {
   const home = temporaryRoot();
+  const childEnv = { ...process.env };
+  delete childEnv.PI_TOUCHTONE_HOME;
+  delete childEnv.XDG_STATE_HOME;
   execFileSync(
     process.execPath,
     [
@@ -937,10 +1014,10 @@ test("a fresh installation uses the default mailbox", () => {
       "--eval",
       `const { TouchtoneStore } = await import(${JSON.stringify(pathToFileURL(path.resolve("extension.ts")).href)}); new TouchtoneStore().initialize()`,
     ],
-    { env: { ...process.env, HOME: home }, timeout: 10_000 },
+    { env: { ...childEnv, HOME: home }, timeout: 10_000 },
   );
 
-  const root = path.join(home, ".local", "state", "pi", "touchtone");
+  const root = resolveStoreRoot(undefined, {}, home);
   assert.equal(fs.statSync(root).isDirectory(), true);
   assert.equal(fs.statSync(path.join(root, "sessions")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(root, "inboxes")).isDirectory(), true);

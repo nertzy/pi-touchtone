@@ -30,6 +30,28 @@ const DEFAULT_ROOT = path.join(
 );
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 
+function isAbsolutePath(value: string | undefined): value is string {
+  return typeof value === "string" && path.isAbsolute(value);
+}
+
+export function resolveStoreRoot(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): string {
+  if (explicit) return explicit;
+  if (isAbsolutePath(env.PI_TOUCHTONE_HOME)) return env.PI_TOUCHTONE_HOME;
+  const legacy =
+    home === os.homedir()
+      ? DEFAULT_ROOT
+      : path.join(home, ".local", "state", "pi", "touchtone");
+  if (isAbsolutePath(env.XDG_STATE_HOME)) {
+    const xdg = path.join(env.XDG_STATE_HOME, "pi", "touchtone");
+    if (fs.existsSync(xdg) || !fs.existsSync(legacy)) return xdg;
+  }
+  return legacy;
+}
+
 export interface TouchtoneSession {
   sessionId: string;
   sessionName?: string;
@@ -53,6 +75,7 @@ export interface TouchtonePaths {
   root: string;
   sessions: string;
   inboxes: string;
+  metadata: string;
 }
 
 export interface TouchtoneOptions {
@@ -61,11 +84,12 @@ export interface TouchtoneOptions {
   pollMs?: number;
 }
 
-export function getTouchtonePaths(root = DEFAULT_ROOT): TouchtonePaths {
+export function getTouchtonePaths(root = resolveStoreRoot()): TouchtonePaths {
   return {
     root,
     sessions: path.join(root, "sessions"),
     inboxes: path.join(root, "inboxes"),
+    metadata: path.join(root, "metadata"),
   };
 }
 
@@ -140,7 +164,7 @@ export class TouchtoneStore {
   readonly paths: TouchtonePaths;
 
   constructor(options: Pick<TouchtoneOptions, "root"> = {}) {
-    this.paths = getTouchtonePaths(options.root);
+    this.paths = getTouchtonePaths(resolveStoreRoot(options.root));
   }
 
   initialize(sessionId?: string): void {
