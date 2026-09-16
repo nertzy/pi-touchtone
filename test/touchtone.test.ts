@@ -836,7 +836,9 @@ test("broadcast tool call reaches every selector match and reports counts", asyn
   assert.match(text, /📣/);
   assert.match(text, /E-123=2/);
   assert.match(text, /Bob/);
+  assert.match(text, /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/);
   assert.match(text, /Carol/);
+  assert.match(text, /cccccccc-cccc-cccc-cccc-cccccccccccc/);
   const details = result.details as { broadcast: { delivered: number } };
   assert.equal(details.broadcast.delivered, 2);
 
