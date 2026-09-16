@@ -29,6 +29,17 @@ const DEFAULT_ROOT = path.join(
   "touchtone",
 );
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
+const PUBLISHER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+const MAX_SIDECAR_BYTES = 64 * 1024;
+const CORE_FIELD_NAMES = new Set([
+  "sessionId",
+  "sessionName",
+  "pid",
+  "cwd",
+  "cmuxWorkspace",
+  "cmuxSurface",
+  "cmuxPanel",
+]);
 
 function isAbsolutePath(value: string | undefined): value is string {
   return typeof value === "string" && path.isAbsolute(value);
@@ -69,6 +80,12 @@ export interface TouchtoneMessage {
   recipientSessionId: string;
   message: string;
   sentAt: string;
+}
+
+export interface PhonebookEntry {
+  session: TouchtoneSession;
+  metadata: Record<string, string[]>;
+  selectors: string[];
 }
 
 export interface TouchtonePaths {
@@ -137,6 +154,30 @@ function readJson(file: string): unknown {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
+function readBoundedSidecar(file: string): string | undefined {
+  const descriptor = fs.openSync(file, "r");
+  try {
+    // Read one byte past the limit so a growing or replaced file stays bounded.
+    const buffer = Buffer.alloc(MAX_SIDECAR_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = fs.readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        null,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead > MAX_SIDECAR_BYTES) return undefined;
+    return buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function isSession(value: unknown): value is TouchtoneSession {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<TouchtoneSession>;
@@ -158,6 +199,46 @@ function isMessage(value: unknown): value is TouchtoneMessage {
     typeof message.message === "string" &&
     typeof message.sentAt === "string"
   );
+}
+
+function metadataValues(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const record: Record<string, string[]> = {};
+  for (const [key, leaf] of Object.entries(value)) {
+    if (typeof leaf === "string") {
+      record[key] = [leaf];
+    } else if (
+      Array.isArray(leaf) &&
+      leaf.every((item) => typeof item === "string")
+    ) {
+      record[key] = leaf as string[];
+    } else {
+      return undefined;
+    }
+  }
+  return record;
+}
+
+export function sessionSelectors(
+  session: TouchtoneSession,
+  metadata: Record<string, string[]>,
+): string[] {
+  const values = [
+    session.sessionId,
+    typeof session.sessionName === "string" && session.sessionName.length > 0
+      ? session.sessionName
+      : undefined,
+    String(session.pid),
+    session.cwd,
+    session.cmuxWorkspace,
+    session.cmuxSurface,
+    session.cmuxPanel,
+  ].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  for (const list of Object.values(metadata)) values.push(...list);
+  return [...new Set(values)];
 }
 
 export class TouchtoneStore {
@@ -183,6 +264,73 @@ export class TouchtoneStore {
 
   inboxDirectory(sessionId: string): string {
     return path.join(this.paths.inboxes, requireSessionId(sessionId));
+  }
+
+  metadataDirectory(sessionId: string): string {
+    return path.join(this.paths.metadata, requireSessionId(sessionId));
+  }
+
+  writeMetadata(
+    sessionId: string,
+    publisher: string,
+    record: Record<string, string | string[]>,
+  ): void {
+    if (!PUBLISHER_RE.test(publisher))
+      throw new Error(`Invalid metadata publisher name: ${publisher}`);
+    if (!metadataValues(record))
+      throw new Error("Metadata values must be strings or string arrays.");
+    atomicWrite(
+      path.join(this.metadataDirectory(sessionId), `${publisher}.json`),
+      record,
+    );
+  }
+
+  removeMetadata(sessionId: string, publisher: string): void {
+    if (!PUBLISHER_RE.test(publisher))
+      throw new Error(`Invalid metadata publisher name: ${publisher}`);
+    try {
+      fs.unlinkSync(
+        path.join(this.metadataDirectory(sessionId), `${publisher}.json`),
+      );
+    } catch {
+      // Removing absent metadata is a no-op.
+    }
+  }
+
+  phonebook(): PhonebookEntry[] {
+    return this.liveSessions().map((session) => {
+      const metadata: Record<string, string[]> = {};
+      let files: string[] = [];
+      try {
+        files = fs
+          .readdirSync(this.metadataDirectory(session.sessionId))
+          .filter((name) => name.endsWith(".json") && !name.startsWith("."))
+          .sort();
+      } catch {
+        // A missing metadata directory contributes nothing.
+      }
+      for (const name of files) {
+        const file = path.join(this.metadataDirectory(session.sessionId), name);
+        try {
+          if (fs.statSync(file).size > MAX_SIDECAR_BYTES) continue;
+          const contents = readBoundedSidecar(file);
+          if (contents === undefined) continue;
+          const record = metadataValues(JSON.parse(contents));
+          if (!record) continue;
+          for (const [key, values] of Object.entries(record)) {
+            if (CORE_FIELD_NAMES.has(key) || key in metadata) continue;
+            metadata[key] = values;
+          }
+        } catch {
+          // A malformed or vanished sidecar contributes nothing.
+        }
+      }
+      return {
+        session,
+        metadata,
+        selectors: sessionSelectors(session, metadata),
+      };
+    });
   }
 
   register(record: TouchtoneSession): void {

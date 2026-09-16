@@ -21,6 +21,7 @@ import {
 import {
   createTouchtoneExtension,
   resolveStoreRoot,
+  type TouchtoneSession,
   TouchtoneStore,
 } from "../extension.ts";
 
@@ -42,6 +43,162 @@ function temporaryRoot(): string {
   roots.push(root);
   return root;
 }
+
+function rosterSession(
+  id: string,
+  over: Partial<TouchtoneSession> = {},
+): TouchtoneSession {
+  return {
+    sessionId: id,
+    sessionName: id,
+    pid: process.pid,
+    cwd: `/tmp/${id}`,
+    ...over,
+  };
+}
+
+test("phonebook merges publisher-scoped sidecars for live sessions", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.writeMetadata("alice", "ticket", { ticket: "E-123" });
+  store.writeMetadata("alice", "pr", {
+    prs: ["https://example.com/pr/42"],
+  });
+  const [entry] = store.phonebook();
+  assert.deepEqual(entry.metadata, {
+    prs: ["https://example.com/pr/42"],
+    ticket: ["E-123"],
+  });
+  assert.ok(entry.selectors.includes("alice"));
+  assert.ok(entry.selectors.includes("E-123"));
+  assert.ok(entry.selectors.includes("https://example.com/pr/42"));
+  assert.ok(entry.selectors.includes(String(process.pid)));
+  assert.ok(entry.selectors.includes("/tmp/alice"));
+});
+
+test("phonebook ignores sidecar keys that collide with core fields", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.writeMetadata("alice", "evil", {
+    sessionId: "mallory",
+    pid: ["1"],
+    updatedAt: "addressable-timestamp",
+  });
+  const [entry] = store.phonebook();
+  assert.deepEqual(entry.metadata, {
+    updatedAt: ["addressable-timestamp"],
+  });
+  assert.ok(!entry.selectors.includes("mallory"));
+  assert.ok(entry.selectors.includes("addressable-timestamp"));
+});
+
+test("phonebook preserves session names exactly in selectors", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice", { sessionName: " padded " }));
+
+  const [entry] = store.phonebook();
+  assert.ok(entry.selectors.includes(" padded "));
+  assert.ok(!entry.selectors.includes("padded"));
+});
+
+test("removeMetadata rejects invalid publisher names", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  assert.throws(
+    () => store.removeMetadata("alice", "../evil"),
+    /Invalid metadata publisher name: \.\.\/evil/,
+  );
+});
+
+test("removeMetadata removes one publisher contribution", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.writeMetadata("alice", "ticket", { ticket: "E-123" });
+
+  const [before] = store.phonebook();
+  assert.deepEqual(before.metadata.ticket, ["E-123"]);
+  assert.ok(before.selectors.includes("E-123"));
+
+  store.removeMetadata("alice", "ticket");
+
+  const [after] = store.phonebook();
+  assert.equal(after.metadata.ticket, undefined);
+  assert.ok(!after.selectors.includes("E-123"));
+  assert.ok(after.selectors.includes("alice"));
+  assert.ok(after.selectors.includes(String(process.pid)));
+  assert.ok(after.selectors.includes("/tmp/alice"));
+});
+
+test("phonebook includes each optional cmux selector exactly once", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  store.initialize("alice");
+  store.register(
+    rosterSession("alice", {
+      cmuxWorkspace: "workspace-1",
+      cmuxSurface: "surface-1",
+      cmuxPanel: "panel-1",
+    }),
+  );
+
+  const [entry] = store.phonebook();
+  for (const selector of ["workspace-1", "surface-1", "panel-1"]) {
+    assert.equal(
+      entry.selectors.filter((value) => value === selector).length,
+      1,
+    );
+  }
+});
+
+test("phonebook ignores sidecars for unknown sessions", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.writeMetadata("ghost", "ticket", { ticket: "E-999" });
+  assert.equal(store.phonebook().length, 1);
+  assert.deepEqual(store.phonebook()[0].metadata, {});
+});
+
+test("phonebook tolerates a missing metadata directory and malformed sidecars", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  assert.deepEqual(store.phonebook()[0].metadata, {});
+  const dir = store.metadataDirectory("alice");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "broken.json"), "{not json");
+  fs.writeFileSync(path.join(dir, "wrong.json"), JSON.stringify({ n: 5 }));
+  const emptyExact = JSON.stringify({ exact: "" });
+  const exact = JSON.stringify({
+    exact: "x".repeat(64 * 1024 - Buffer.byteLength(emptyExact)),
+  });
+  assert.equal(Buffer.byteLength(exact), 64 * 1024);
+  fs.writeFileSync(path.join(dir, "exact.json"), exact);
+  fs.writeFileSync(
+    path.join(dir, "huge.json"),
+    JSON.stringify({ t: "x".repeat(70 * 1024) }),
+  );
+  assert.deepEqual(store.phonebook()[0].metadata, {
+    exact: ["x".repeat(64 * 1024 - Buffer.byteLength(emptyExact))],
+  });
+});
+
+test("phonebook merge is deterministic across publisher collisions", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.writeMetadata("alice", "b-publisher", { tag: "from-b" });
+  store.writeMetadata("alice", "a-publisher", { tag: "from-a" });
+  assert.deepEqual(store.phonebook()[0].metadata, { tag: ["from-a"] });
+});
 
 test("resolveStoreRoot prefers the explicit constructor root", () => {
   const explicit = temporaryRoot();
