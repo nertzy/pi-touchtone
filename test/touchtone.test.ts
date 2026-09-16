@@ -21,6 +21,7 @@ import {
 import {
   createTouchtoneExtension,
   resolveStoreRoot,
+  type TouchtoneMessage,
   type TouchtoneSession,
   TouchtoneStore,
 } from "../extension.ts";
@@ -53,6 +54,7 @@ function rosterSession(
     sessionName: id,
     pid: process.pid,
     cwd: `/tmp/${id}`,
+    updatedAt: "2026-01-01T00:00:00.000Z",
     ...over,
   };
 }
@@ -532,6 +534,7 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
   >();
   let widget: HarnessComponent | undefined;
   let busy = false;
+  let sendFailure: Error | undefined;
   const pi = {
     getSessionName: () => name,
     on(
@@ -553,6 +556,11 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
       message: { customType: string; content: string; details?: unknown },
       options: unknown,
     ) {
+      if (sendFailure) {
+        const error = sendFailure;
+        sendFailure = undefined;
+        throw error;
+      }
       if (busy) steered.push({ message, options });
       else delivered.push({ message, options });
     },
@@ -563,6 +571,7 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
     mode: "tui",
     sessionManager: { getSessionId: () => id },
     hasPendingMessages: () => steered.length > 0,
+    isIdle: () => !busy,
     ui: {
       setWidget(
         _key: string,
@@ -597,6 +606,9 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
     },
     setBusy(value: boolean) {
       busy = value;
+    },
+    failNextSendMessage(error = new Error("sendMessage failed")) {
+      sendFailure = error;
     },
     finishTurn() {
       delivered.push(...steered.splice(0));
@@ -1102,6 +1114,283 @@ test("renders a compact roster summary and an expanded width-aware table", async
   assert.equal(result.content[0].text, "model-facing roster remains unchanged");
 });
 
+test("two pending mails arrive as one batched message with one turn trigger", async (t) => {
+  const root = temporaryRoot();
+  const bobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const store = new TouchtoneStore({ root });
+  store.initialize();
+  const recipient = {
+    sessionId: bobId,
+    sessionName: "Bob",
+    pid: process.pid,
+    cwd: "/tmp/bob",
+    updatedAt: new Date().toISOString(),
+  };
+  store.register(recipient);
+  const sender = {
+    sessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    sessionName: "Alice",
+    pid: process.pid,
+    cwd: "/tmp/alice",
+    updatedAt: new Date().toISOString(),
+  };
+  store.send(sender, recipient, "first");
+  store.send(
+    {
+      ...sender,
+      sessionId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      sessionName: "Carol",
+    },
+    recipient,
+    "second",
+  );
+  const bob = harness(bobId, "Bob", root);
+  t.after(async () => bob.event("session_shutdown"));
+
+  await bob.event("session_start");
+  assert.equal(bob.delivered.length, 1);
+  const details = bob.delivered[0].message.details as {
+    messages: TouchtoneMessage[];
+  };
+  assert.deepEqual(details.messages.map((mail) => mail.message).sort(), [
+    "first",
+    "second",
+  ]);
+  assert.match(
+    bob.delivered[0].message.content,
+    /Alice \(aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/,
+  );
+  assert.match(
+    bob.delivered[0].message.content,
+    /Carol \(cccccccc-cccc-cccc-cccc-cccccccccccc/,
+  );
+  assert.deepEqual(bob.delivered[0].options, {
+    deliverAs: "steer",
+    triggerTurn: true,
+  });
+  assert.deepEqual(fs.readdirSync(store.inboxDirectory(bobId)), []);
+});
+
+test("handed-off mail with an unlink failure is not delivered twice", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  const sender = rosterSession("alice");
+  const recipient = rosterSession("bob");
+  store.initialize(recipient.sessionId);
+  store.register(recipient);
+  store.send(sender, recipient, "once");
+
+  const originalUnlinkSync = fsDefault.unlinkSync;
+  const unlinkFailure = Object.assign(new Error("forced unlink failure"), {
+    code: "EACCES",
+  });
+  let unlinkAttempts = 0;
+  fsDefault.unlinkSync = () => {
+    unlinkAttempts += 1;
+    throw unlinkFailure;
+  };
+  syncBuiltinESMExports();
+
+  let deliveries = 0;
+  try {
+    store.consume(recipient.sessionId, (messages) => {
+      deliveries += 1;
+      assert.deepEqual(
+        messages.map(({ message }) => message),
+        ["once"],
+      );
+    });
+    assert.equal(deliveries, 1);
+    assert.equal(unlinkAttempts, 1);
+    assert.equal(
+      fs.readdirSync(store.inboxDirectory(recipient.sessionId)).length,
+      1,
+    );
+  } finally {
+    fsDefault.unlinkSync = originalUnlinkSync;
+    syncBuiltinESMExports();
+  }
+
+  store.consume(recipient.sessionId, () => {
+    deliveries += 1;
+  });
+  assert.equal(deliveries, 1);
+  assert.deepEqual(
+    fs.readdirSync(store.inboxDirectory(recipient.sessionId)),
+    [],
+  );
+});
+
+test("busy session holds mail until turn_end, then delivers one combined steer", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "first",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "second",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(bob.steered.length, 0);
+
+  await bob.event("turn_end");
+  assert.equal(bob.steered.length, 1);
+  const details = bob.steered[0].message.details as {
+    messages: TouchtoneMessage[];
+  };
+  assert.deepEqual(
+    details.messages.map((mail) => mail.message),
+    ["first", "second"],
+  );
+  assert.deepEqual(
+    fs.readdirSync(
+      path.join(root, "inboxes", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+    ),
+    [],
+  );
+});
+
+test("empty and malformed-only sweeps deliver nothing", async (t) => {
+  const root = temporaryRoot();
+  const bobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const bob = harness(bobId, "Bob", root);
+  t.after(async () => bob.event("session_shutdown"));
+  await bob.event("session_start");
+  const malformed = path.join(root, "inboxes", bobId, "broken.json");
+  fs.writeFileSync(malformed, "not-json");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(bob.delivered.length, 0);
+  assert.equal(bob.steered.length, 0);
+  assert.equal(fs.existsSync(malformed), true);
+});
+
+test("a throwing sendMessage leaves all batch files and rolls back on-deck", async (t) => {
+  const root = temporaryRoot();
+  const bobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const store = new TouchtoneStore({ root });
+  store.initialize();
+  const recipient = {
+    sessionId: bobId,
+    sessionName: "Bob",
+    pid: process.pid,
+    cwd: "/tmp/bob",
+    updatedAt: new Date().toISOString(),
+  };
+  store.register(recipient);
+  const sender = {
+    sessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    sessionName: "Alice",
+    pid: process.pid,
+    cwd: "/tmp/alice",
+    updatedAt: new Date().toISOString(),
+  };
+  store.send(sender, recipient, "first");
+  store.send(sender, recipient, "second");
+  const bob = harness(bobId, "Bob", root);
+  bob.failNextSendMessage();
+  t.after(async () => bob.event("session_shutdown"));
+
+  await bob.event("session_start");
+  assert.equal(
+    fs
+      .readdirSync(store.inboxDirectory(bobId))
+      .filter((file) => file.endsWith(".json")).length,
+    2,
+  );
+  assert.deepEqual(bob.widgetLines(), []);
+  await waitFor(() => bob.delivered.length === 1);
+  const details = bob.delivered[0].message.details as {
+    messages: TouchtoneMessage[];
+  };
+  assert.equal(details.messages.length, 2);
+});
+
+test("message_start clears every id in a batch", async (t) => {
+  const root = temporaryRoot();
+  const bobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const store = new TouchtoneStore({ root });
+  store.initialize();
+  const recipient = {
+    sessionId: bobId,
+    sessionName: "Bob",
+    pid: process.pid,
+    cwd: "/tmp/bob",
+    updatedAt: new Date().toISOString(),
+  };
+  store.register(recipient);
+  const sender = {
+    sessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    sessionName: "Alice",
+    pid: process.pid,
+    cwd: "/tmp/alice",
+    updatedAt: new Date().toISOString(),
+  };
+  store.send(sender, recipient, "first");
+  store.send(sender, recipient, "second");
+  const bob = harness(bobId, "Bob", root);
+  t.after(async () => bob.event("session_shutdown"));
+  await bob.event("session_start");
+  assert.equal(bob.widgetLines().length, 1);
+  await bob.event("message_start", {
+    message: { role: "custom", ...bob.delivered[0].message },
+  });
+  assert.deepEqual(bob.widgetLines(), []);
+});
+
+test("renderer stacks a batch and preserves legacy message history", () => {
+  const root = temporaryRoot();
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  const direct: TouchtoneMessage = {
+    id: "1",
+    sender: {
+      sessionId: "a",
+      sessionName: "Alice",
+      pid: 1,
+      cwd: "/a",
+      updatedAt: "now",
+    },
+    recipientSessionId: "b",
+    message: "direct body",
+    sentAt: "now",
+  };
+  const broadcast: TouchtoneMessage = {
+    ...direct,
+    id: "2",
+    sender: { ...direct.sender, sessionId: "c", sessionName: "Carol" },
+    message: "broadcast body",
+    broadcastId: "group",
+  };
+  const batch = bob.renderIncoming({
+    details: { messages: [direct, broadcast] },
+  });
+  assert.ok(batch);
+  const rendered = batch.render(80).map(stripTerminalSequences).join("\n");
+  assert.match(rendered, /📞 Alice/);
+  assert.match(rendered, /direct body/);
+  assert.match(rendered, /📣 Carol/);
+  assert.match(rendered, /broadcast body/);
+  const legacy = bob.renderIncoming({ details: direct });
+  assert.ok(legacy);
+  assert.match(
+    legacy.render(80).map(stripTerminalSequences).join("\n"),
+    /📞 Alice/,
+  );
+});
+
 test("steers a busy recipient nonblockingly at its next turn boundary", async () => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
@@ -1115,6 +1404,8 @@ test("steers a busy recipient nonblockingly at its next turn boundary", async ()
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     message: "Change direction after this tool call.",
   });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
   await waitFor(() => bob.steered.length === 1);
   assert.equal(bob.delivered.length, 0);
 
@@ -1347,6 +1638,8 @@ test("keeps unopened mail on deck until its matching custom message starts", asy
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     message: "Queued while you work",
   });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
   await waitFor(() => bob.steered.length === 1);
   assert.match(stripTerminalSequences(bob.widgetLines()[0]), /^📞 /);
 
@@ -1380,6 +1673,8 @@ test("clears on-deck mail when SDK reports no pending messages at agent end", as
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     message: "Queued before agent end",
   });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
   await waitFor(() => bob.steered.length === 1);
   assert.equal(bob.widgetLines().length, 1);
 
@@ -1405,6 +1700,8 @@ test("keeps on-deck mail when SDK reports pending messages at agent end", async 
     to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     message: "Still pending at agent end",
   });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
   await waitFor(() => bob.steered.length === 1);
   assert.equal(bob.widgetLines().length, 1);
 

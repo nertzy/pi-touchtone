@@ -83,6 +83,10 @@ export interface TouchtoneMessage {
   broadcastId?: string;
 }
 
+export interface TouchtoneInboxDetails {
+  messages: TouchtoneMessage[];
+}
+
 export interface BroadcastDetails {
   broadcastId: string;
   recipients: TouchtoneSession[];
@@ -166,6 +170,15 @@ function isCommittedWriteError(error: unknown): boolean {
   );
 }
 
+function isErrno(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
 function atomicWrite(file: string, value: unknown): void {
   ensurePrivateDirectory(path.dirname(file));
   const temporary = path.join(
@@ -246,6 +259,14 @@ function isMessage(value: unknown): value is TouchtoneMessage {
   );
 }
 
+function inboxMessages(details: unknown): TouchtoneMessage[] | undefined {
+  if (isMessage(details)) return [details];
+  if (!details || typeof details !== "object") return undefined;
+  const messages = (details as Partial<TouchtoneInboxDetails>).messages;
+  if (!Array.isArray(messages) || !messages.every(isMessage)) return undefined;
+  return messages;
+}
+
 function metadataValues(value: unknown): Record<string, string[]> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return undefined;
@@ -288,6 +309,7 @@ export function sessionSelectors(
 
 export class TouchtoneStore {
   readonly paths: TouchtonePaths;
+  private readonly handedOff = new Set<string>();
 
   constructor(options: Pick<TouchtoneOptions, "root"> = {}) {
     this.paths = getTouchtonePaths(resolveStoreRoot(options.root));
@@ -529,21 +551,45 @@ export class TouchtoneStore {
 
   consume(
     sessionId: string,
-    deliver: (message: TouchtoneMessage) => void,
+    deliver: (messages: TouchtoneMessage[]) => void,
   ): void {
     const directory = this.inboxDirectory(sessionId);
     ensurePrivateDirectory(directory);
+
+    for (const file of [...this.handedOff]) {
+      try {
+        fs.unlinkSync(file);
+        this.handedOff.delete(file);
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) this.handedOff.delete(file);
+      }
+    }
+
+    const mails: { file: string; message: TouchtoneMessage }[] = [];
     for (const entry of fs.readdirSync(directory).sort()) {
       if (!entry.endsWith(".json") || entry.startsWith(".")) continue;
       const file = path.join(directory, entry);
+      if (this.handedOff.has(file)) continue;
       try {
         const value = readJson(file);
         if (!isMessage(value) || value.recipientSessionId !== sessionId)
           continue;
-        deliver(value);
-        fs.unlinkSync(file);
+        mails.push({ file, message: value });
       } catch {
         // Leave unread mail in place for a later retry or manual inspection.
+      }
+    }
+    if (mails.length === 0) return;
+    try {
+      deliver(mails.map((mail) => mail.message));
+    } catch {
+      return;
+    }
+    for (const { file } of mails) {
+      try {
+        fs.unlinkSync(file);
+      } catch (error) {
+        if (!isErrno(error, "ENOENT")) this.handedOff.add(file);
       }
     }
   }
@@ -677,6 +723,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     let watcher: fs.FSWatcher | undefined;
     let poller: ReturnType<typeof setInterval> | undefined;
     let consuming = false;
+    let awaitingTurnEnd = false;
     const unopened = new Set<string>();
 
     const updateOnDeck = (): void => {
@@ -726,28 +773,40 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     const register = (): void => store.register(self());
 
-    const consume = (): void => {
+    const batchContent = (messages: TouchtoneMessage[]): string => {
+      if (messages.length === 1) {
+        const mail = messages[0];
+        const senderName = mail.sender.sessionName?.trim() || "unnamed session";
+        const marker = mail.broadcastId ? "📣" : "📞";
+        return `${marker} Incoming from ${senderName} (${mail.sender.sessionId}, pid ${mail.sender.pid}):\n${mail.message}`;
+      }
+      const lines = messages.map((mail, index) => {
+        const senderName = mail.sender.sessionName?.trim() || "unnamed session";
+        const marker = mail.broadcastId ? "📣" : "📞";
+        return `${marker} ${index + 1}. From ${senderName} (${mail.sender.sessionId}, pid ${mail.sender.pid}):\n${mail.message}`;
+      });
+      return `Touchtone batch — ${messages.length} messages:\n\n${lines.join("\n\n")}`;
+    };
+
+    const sweep = (): void => {
       if (consuming || !sessionId) return;
       consuming = true;
       try {
-        store.consume(sessionId, (value) => {
-          const senderName =
-            value.sender.sessionName?.trim() || "unnamed session";
-          unopened.add(value.id);
+        store.consume(sessionId, (messages) => {
+          for (const mail of messages) unopened.add(mail.id);
           updateOnDeck();
           try {
-            const marker = value.broadcastId ? "📣" : "📞";
             pi.sendMessage(
               {
                 customType: "touchtone",
-                content: `${marker} Incoming from ${senderName} (${value.sender.sessionId}, pid ${value.sender.pid}):\n${value.message}`,
+                content: batchContent(messages),
                 display: true,
-                details: value,
+                details: { messages } satisfies TouchtoneInboxDetails,
               },
               { deliverAs: "steer", triggerTurn: true },
             );
           } catch (error) {
-            unopened.delete(value.id);
+            for (const mail of messages) unopened.delete(mail.id);
             updateOnDeck();
             throw error;
           }
@@ -757,6 +816,16 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       }
     };
 
+    const consume = (): void => {
+      if (!context) return;
+      if (context.isIdle() && unopened.size === 0) {
+        awaitingTurnEnd = false;
+        sweep();
+        return;
+      }
+      awaitingTurnEnd = true;
+    };
+
     const stop = (): void => {
       watcher?.close();
       watcher = undefined;
@@ -764,21 +833,28 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       poller = undefined;
     };
 
-    pi.registerMessageRenderer<TouchtoneMessage>(
+    pi.registerMessageRenderer<TouchtoneInboxDetails>(
       "touchtone",
       (message, renderOptions, theme) => {
-        if (!isMessage(message.details)) return undefined;
-        return new ChatBubble({
-          direction: "incoming",
-          label: renderMailLabel(
-            message.details.sender,
-            renderOptions.expanded,
-            message.details.broadcastId ? "📣" : "📞",
-          ),
-          body: message.details.message,
-          theme,
-          styleLabel: (text) => theme.fg("customMessageLabel", text),
-        });
+        const messages = inboxMessages(message.details);
+        if (!messages) return undefined;
+        const stack = new Container();
+        for (const mail of messages) {
+          stack.addChild(
+            new ChatBubble({
+              direction: "incoming",
+              label: renderMailLabel(
+                mail.sender,
+                renderOptions.expanded,
+                mail.broadcastId ? "📣" : "📞",
+              ),
+              body: mail.message,
+              theme,
+              styleLabel: (text) => theme.fg("customMessageLabel", text),
+            }),
+          );
+        }
+        return stack;
       },
     );
 
@@ -1036,9 +1112,18 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       const message = event.message;
       if (message.role !== "custom" || message.customType !== "touchtone")
         return;
-      const details = message.details;
-      if (!isMessage(details) || !unopened.delete(details.id)) return;
-      updateOnDeck();
+      const messages = inboxMessages(message.details);
+      if (!messages) return;
+      let cleared = false;
+      for (const mail of messages)
+        cleared = unopened.delete(mail.id) || cleared;
+      if (cleared) updateOnDeck();
+    });
+
+    pi.on("turn_end", async () => {
+      if (!sessionId || !awaitingTurnEnd) return;
+      awaitingTurnEnd = false;
+      sweep();
     });
 
     pi.on("agent_end", async (_event, ctx) => {
