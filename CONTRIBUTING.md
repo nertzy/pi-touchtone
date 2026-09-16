@@ -41,7 +41,7 @@ apply the Biome and Markdown autofixes. The
 
 For a behavior change, start with a test that demonstrates it. The tests in
 [`test/touchtone.test.ts`](./test/touchtone.test.ts) use temporary
-mailboxes so they don't interfere with your running sessions. Keep that
+inboxes so they don't interfere with your running sessions. Keep that
 isolation when adding tests.
 
 You can try your checkout in Pi with:

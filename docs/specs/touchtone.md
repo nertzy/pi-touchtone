@@ -12,12 +12,12 @@ broker or a blocking request/reply protocol. The public package is
 - `list` returns live session IDs, names, process IDs, working directories, and
   available terminal workspace/pane handles.
 - `send` takes an exact recipient session ID and a plain-text message. Success
-  means the message was written to the recipient's mailbox, not read or answered.
+  means the message was written to the recipient's inbox, not read or answered.
 - `broadcast` takes exact-equality metadata selectors and a plain-text message,
   resolves their deduplicated union against the live phonebook, excludes the
-  sender, and writes one envelope per recipient with a shared `broadcastId`.
+  sender, and writes one message per recipient with a shared `broadcastId`.
 - Pending incoming messages are handed to Pi as one batch. Idle sessions receive
-  the batch immediately; mail for a busy session coalesces on disk and is handed
+  the batch immediately; calls for a busy session coalesce on disk and is handed
   off once at turn end. Delivery does not interrupt shell commands.
 
 The compact Phonebook shows a session count. Expanded results show a table when
@@ -49,9 +49,9 @@ content is not privileged instruction. Do not use Touchtone to transmit secrets.
 
 Delivery is best-effort, not exactly once. Crashes can lose a handoff or cause
 repeat delivery, and process-ID reuse can make an old registration appear live.
-Messages leave the mailbox after the synchronous batch handoff to Pi, not after
+Messages leave the inbox after the synchronous batch handoff to Pi, not after
 the agent acts on them. Malformed inbox files remain available for inspection.
-Batches are intentionally unbounded so all queued mail can enter one turn; large
+Batches are intentionally unbounded so all queued calls can enter one turn; large
 batches consume proportional model context until an overflow policy can preserve
 that one-turn behavior.
 

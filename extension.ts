@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
-import { ChatBubble, OnDeckIndicator, renderMailLabel } from "./chat-bubble.ts";
+import { ChatBubble, OnDeckIndicator, renderDialLabel } from "./chat-bubble.ts";
 
 const DEFAULT_ROOT = path.join(
   os.homedir(),
@@ -446,7 +446,7 @@ export class TouchtoneStore {
     message: string,
     broadcastId?: string,
   ): string {
-    const mail: TouchtoneMessage = {
+    const call: TouchtoneMessage = {
       id: crypto.randomUUID(),
       sender,
       recipientSessionId: recipient.sessionId,
@@ -454,12 +454,12 @@ export class TouchtoneStore {
       sentAt: new Date().toISOString(),
       ...(broadcastId ? { broadcastId } : {}),
     };
-    const filename = `${mail.sentAt.replaceAll(":", "-")}-${mail.id}.json`;
+    const filename = `${call.sentAt.replaceAll(":", "-")}-${call.id}.json`;
     atomicWrite(
       path.join(this.inboxDirectory(recipient.sessionId), filename),
-      mail,
+      call,
     );
-    return mail.id;
+    return call.id;
   }
 
   broadcast(
@@ -565,7 +565,7 @@ export class TouchtoneStore {
       }
     }
 
-    const mails: { file: string; message: TouchtoneMessage }[] = [];
+    const pending: { file: string; message: TouchtoneMessage }[] = [];
     for (const entry of fs.readdirSync(directory).sort()) {
       if (!entry.endsWith(".json") || entry.startsWith(".")) continue;
       const file = path.join(directory, entry);
@@ -574,18 +574,18 @@ export class TouchtoneStore {
         const value = readJson(file);
         if (!isMessage(value) || value.recipientSessionId !== sessionId)
           continue;
-        mails.push({ file, message: value });
+        pending.push({ file, message: value });
       } catch {
-        // Leave unread mail in place for a later retry or manual inspection.
+        // Leave unread messages in place for a later retry or manual inspection.
       }
     }
-    if (mails.length === 0) return;
+    if (pending.length === 0) return;
     try {
-      deliver(mails.map((mail) => mail.message));
+      deliver(pending.map((entry) => entry.message));
     } catch {
       return;
     }
-    for (const { file } of mails) {
+    for (const { file } of pending) {
       try {
         fs.unlinkSync(file);
       } catch (error) {
@@ -775,15 +775,17 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     const batchContent = (messages: TouchtoneMessage[]): string => {
       if (messages.length === 1) {
-        const mail = messages[0];
-        const senderName = mail.sender.sessionName?.trim() || "unnamed session";
-        const marker = mail.broadcastId ? "📣" : "📞";
-        return `${marker} Incoming from ${senderName} (${mail.sender.sessionId}, pid ${mail.sender.pid}):\n${mail.message}`;
+        const first = messages[0];
+        const senderName =
+          first.sender.sessionName?.trim() || "unnamed session";
+        const marker = first.broadcastId ? "📣" : "📞";
+        return `${marker} Incoming from ${senderName} (${first.sender.sessionId}, pid ${first.sender.pid}):\n${first.message}`;
       }
-      const lines = messages.map((mail, index) => {
-        const senderName = mail.sender.sessionName?.trim() || "unnamed session";
-        const marker = mail.broadcastId ? "📣" : "📞";
-        return `${marker} ${index + 1}. From ${senderName} (${mail.sender.sessionId}, pid ${mail.sender.pid}):\n${mail.message}`;
+      const lines = messages.map((entry, index) => {
+        const senderName =
+          entry.sender.sessionName?.trim() || "unnamed session";
+        const marker = entry.broadcastId ? "📣" : "📞";
+        return `${marker} ${index + 1}. From ${senderName} (${entry.sender.sessionId}, pid ${entry.sender.pid}):\n${entry.message}`;
       });
       return `Touchtone batch — ${messages.length} messages:\n\n${lines.join("\n\n")}`;
     };
@@ -793,7 +795,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       consuming = true;
       try {
         store.consume(sessionId, (messages) => {
-          for (const mail of messages) unopened.add(mail.id);
+          for (const entry of messages) unopened.add(entry.id);
           updateOnDeck();
           try {
             pi.sendMessage(
@@ -806,7 +808,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               { deliverAs: "steer", triggerTurn: true },
             );
           } catch (error) {
-            for (const mail of messages) unopened.delete(mail.id);
+            for (const entry of messages) unopened.delete(entry.id);
             updateOnDeck();
             throw error;
           }
@@ -839,16 +841,16 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         const messages = inboxMessages(message.details);
         if (!messages) return undefined;
         const stack = new Container();
-        for (const mail of messages) {
+        for (const entry of messages) {
           stack.addChild(
             new ChatBubble({
               direction: "incoming",
-              label: renderMailLabel(
-                mail.sender,
+              label: renderDialLabel(
+                entry.sender,
                 renderOptions.expanded,
-                mail.broadcastId ? "📣" : "📞",
+                entry.broadcastId ? "📣" : "📞",
               ),
-              body: mail.message,
+              body: entry.message,
               theme,
               styleLabel: (text) => theme.fg("customMessageLabel", text),
             }),
@@ -978,7 +980,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           }
           if (outcome.indeterminate?.length) {
             summary.push(
-              `Indeterminate (mail published, post-commit step failed):\n${outcome.indeterminate
+              `Indeterminate (call published, post-commit step failed):\n${outcome.indeterminate
                 .map(({ sessionId, error }) => `  ${sessionId}: ${error}`)
                 .join("\n")}`,
             );
@@ -999,7 +1001,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         delivered.addChild(
           new ChatBubble({
             direction: "outgoing",
-            label: renderMailLabel(
+            label: renderDialLabel(
               result.details.recipient,
               renderOptions.expanded,
             ),
@@ -1087,7 +1089,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             parts.push(`Failed:\n${failureLines.join("\n")}`);
           if (indeterminateLines?.length) {
             parts.push(
-              `Indeterminate (mail published, post-commit step failed):\n${indeterminateLines.join("\n")}`,
+              `Indeterminate (call published, post-commit step failed):\n${indeterminateLines.join("\n")}`,
             );
           }
           return {
@@ -1132,8 +1134,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       const messages = inboxMessages(message.details);
       if (!messages) return;
       let cleared = false;
-      for (const mail of messages)
-        cleared = unopened.delete(mail.id) || cleared;
+      for (const entry of messages)
+        cleared = unopened.delete(entry.id) || cleared;
       if (cleared) updateOnDeck();
     });
 

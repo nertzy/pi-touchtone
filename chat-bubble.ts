@@ -17,7 +17,7 @@ export interface ChatIdentity {
   pid: number;
 }
 
-export function renderMailLabel(
+export function renderDialLabel(
   identity: ChatIdentity,
   expanded: boolean,
   marker = "📞",

@@ -29,7 +29,7 @@ address and retain the persistent conversation ID as metadata. Do not solve
 this by refusing the second attachment and leaving that agent unreachable.
 
 Each new conversation binding, including `/new` and `/resume`, gets a fresh
-endpoint. Mail for an old address must not silently enter a different
+endpoint. Calls for an old address must not silently enter a different
 conversation. A uniquely resumed instance of the **same conversation** may be
 rediscovered even after renaming or moving panes. Display-name similarity alone
 is not evidence of conversation continuity.
@@ -110,7 +110,7 @@ procedure remain open.
 2. **Endpoint reload continuity:** should `/reload` retain an endpoint when the
    conversation binding is unchanged? Keeping it is recommended; it is not yet
    an approved endpoint-lifetime rule.
-3. **Pickup boundary:** mailbox handoff, queue admission, and admission to a model
+3. **Pickup boundary:** inbox handoff, queue admission, and admission to a model
    turn are different events. Choose and verify the boundary before callback or
    receipt logic depends on it. No local event proves model understanding.
 4. **Callback lifetime:** decide whether the last picked-up caller survives
@@ -126,7 +126,7 @@ procedure remain open.
    adding model-turn acknowledgment loops or false certainty about delivery.
 
 Keep three outcomes distinct throughout the design: rejected with no enqueue,
-explicitly accepted offline storage, and accepted live mail without pickup
+explicitly accepted offline storage, and accepted live calls without pickup
 acknowledgment. None implies exactly-once delivery or permission to retry blindly.
 
 ## Separate follow-on work
