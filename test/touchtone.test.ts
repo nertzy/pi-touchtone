@@ -200,6 +200,230 @@ test("phonebook merge is deterministic across publisher collisions", () => {
   assert.deepEqual(store.phonebook()[0].metadata, { tag: ["from-a"] });
 });
 
+test("broadcast fans out one mail per recipient with a shared broadcastId", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob", "carol"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+  store.writeMetadata("bob", "ticket", { ticket: "E-123" });
+  store.writeMetadata("carol", "ticket", { ticket: "E-123" });
+
+  const outcome = store.broadcast(
+    rosterSession("alice"),
+    ["E-123"],
+    "standup in 5",
+  );
+
+  assert.equal(outcome.delivered, 2);
+  assert.deepEqual(outcome.failed, []);
+  assert.equal(outcome.excludedSelf, false);
+  assert.deepEqual(outcome.matchedBy, { "E-123": 2 });
+  assert.deepEqual(
+    outcome.recipients.map((recipient) => recipient.sessionId).sort(),
+    ["bob", "carol"],
+  );
+  for (const id of ["bob", "carol"]) {
+    const mails = fs.readdirSync(store.inboxDirectory(id));
+    assert.equal(mails.length, 1);
+    const mail = JSON.parse(
+      fs.readFileSync(path.join(store.inboxDirectory(id), mails[0]), "utf8"),
+    );
+    assert.equal(mail.broadcastId, outcome.broadcastId);
+    assert.equal(mail.message, "standup in 5");
+    assert.equal(mail.recipientSessionId, id);
+  }
+  assert.equal(fs.readdirSync(store.inboxDirectory("alice")).length, 0);
+});
+
+test("broadcast matches every phonebook value, dedupes, and excludes self", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice", { cmuxWorkspace: "ws-1" }));
+  store.initialize("bob");
+  store.register(rosterSession("bob", { cmuxWorkspace: "ws-1" }));
+
+  const outcome = store.broadcast(
+    rosterSession("alice"),
+    ["ws-1", "bob", "alice", "bob"],
+    "hi",
+  );
+
+  assert.equal(outcome.delivered, 1);
+  assert.equal(outcome.excludedSelf, true);
+  assert.deepEqual(outcome.matchedBy, { "ws-1": 2, alice: 1, bob: 1 });
+  assert.equal(fs.readdirSync(store.inboxDirectory("alice")).length, 0);
+  assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 1);
+});
+
+test("broadcast rejects blank selectors without enqueueing mail", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+
+  assert.throws(
+    () => store.broadcast(rosterSession("alice"), ["bob", "   "], "hi"),
+    /selectors must be non-blank/i,
+  );
+  for (const id of ["alice", "bob"]) {
+    assert.deepEqual(fs.readdirSync(store.inboxDirectory(id)), []);
+  }
+});
+
+test("broadcast rejects empty messages without enqueueing mail", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+
+  assert.throws(
+    () => store.broadcast(rosterSession("alice"), ["bob"], " \n\t "),
+    /message must be non-empty/i,
+  );
+  for (const id of ["alice", "bob"]) {
+    assert.deepEqual(fs.readdirSync(store.inboxDirectory(id)), []);
+  }
+});
+
+test("broadcast throws when every recipient rejects publication", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob", "carol"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+  for (const id of ["bob", "carol"]) {
+    fs.rmSync(store.inboxDirectory(id), { recursive: true });
+    fs.writeFileSync(store.inboxDirectory(id), "not a directory");
+  }
+
+  assert.throws(
+    () => store.broadcast(rosterSession("alice"), ["bob", "carol"], "hi"),
+    /failed for all 2 recipients.*bob.*carol/is,
+  );
+  assert.deepEqual(fs.readdirSync(store.inboxDirectory("alice")), []);
+  assert.equal(
+    fs.readFileSync(store.inboxDirectory("bob"), "utf8"),
+    "not a directory",
+  );
+  assert.equal(
+    fs.readFileSync(store.inboxDirectory("carol"), "utf8"),
+    "not a directory",
+  );
+});
+
+test("broadcast fails atomically when any selector matches nothing", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+  store.initialize("bob");
+  store.register(rosterSession("bob"));
+
+  assert.throws(
+    () => store.broadcast(rosterSession("alice"), ["bob", "no-such"], "hi"),
+    /no-such.*list/is,
+  );
+  assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 0);
+});
+
+test("broadcast fails when only the sender matches", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  store.initialize("alice");
+  store.register(rosterSession("alice"));
+
+  assert.throws(
+    () => store.broadcast(rosterSession("alice"), ["alice"], "hi"),
+    /only the sender/i,
+  );
+});
+
+test("broadcast counts post-rename failures as delivered and indeterminate", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+
+  const originalRenameSync = fsDefault.renameSync;
+  const postRenameFailure = new Error("forced post-rename failure");
+  fsDefault.renameSync = (source, destination) => {
+    originalRenameSync(source, destination);
+    throw postRenameFailure;
+  };
+  syncBuiltinESMExports();
+
+  try {
+    const outcome = store.broadcast(rosterSession("alice"), ["bob"], "hi");
+    assert.equal(outcome.delivered, 1);
+    assert.deepEqual(outcome.failed, []);
+    assert.deepEqual(outcome.indeterminate, [
+      { sessionId: "bob", error: postRenameFailure.message },
+    ]);
+    assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 1);
+  } finally {
+    fsDefault.renameSync = originalRenameSync;
+    syncBuiltinESMExports();
+  }
+});
+
+test("broadcast reports per-recipient pre-publication failure without rollback", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  for (const id of ["alice", "bob", "carol"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+  fs.rmSync(store.inboxDirectory("carol"), { recursive: true });
+  fs.writeFileSync(store.inboxDirectory("carol"), "not a directory");
+
+  const outcome = store.broadcast(
+    rosterSession("alice"),
+    ["bob", "carol"],
+    "hi",
+  );
+  assert.equal(outcome.delivered, 1);
+  assert.deepEqual(
+    outcome.failed?.map((failure) => failure.sessionId),
+    ["carol"],
+  );
+  assert.equal(fs.readdirSync(store.inboxDirectory("bob")).length, 1);
+});
+
+test("atomic mail publication removes its temporary file when chmod fails", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  for (const id of ["alice", "bob"]) {
+    store.initialize(id);
+    store.register(rosterSession(id));
+  }
+
+  const originalChmodSync = fsDefault.chmodSync;
+  const chmodFailure = new Error("forced chmod failure");
+  fsDefault.chmodSync = () => {
+    throw chmodFailure;
+  };
+  syncBuiltinESMExports();
+
+  try {
+    assert.throws(
+      () => store.send(rosterSession("alice"), rosterSession("bob"), "hi"),
+      (error) => error === chmodFailure,
+    );
+    assert.deepEqual(fs.readdirSync(store.inboxDirectory("bob")), []);
+  } finally {
+    fsDefault.chmodSync = originalChmodSync;
+    syncBuiltinESMExports();
+  }
+});
+
 test("resolveStoreRoot prefers the explicit constructor root", () => {
   const explicit = temporaryRoot();
   assert.equal(resolveStoreRoot(explicit, {}, temporaryRoot()), explicit);

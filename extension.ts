@@ -80,6 +80,17 @@ export interface TouchtoneMessage {
   recipientSessionId: string;
   message: string;
   sentAt: string;
+  broadcastId?: string;
+}
+
+export interface BroadcastDetails {
+  broadcastId: string;
+  recipients: TouchtoneSession[];
+  matchedBy: Record<string, number>;
+  excludedSelf?: boolean;
+  delivered: number;
+  failed?: { sessionId: string; error: string }[];
+  indeterminate?: { sessionId: string; error: string }[];
 }
 
 export interface PhonebookEntry {
@@ -136,18 +147,50 @@ function ensurePrivateDirectory(directory: string): void {
   }
 }
 
+const committedWriteErrors = new WeakSet<object>();
+
+function markCommittedWrite(error: unknown): unknown {
+  const marked =
+    (typeof error === "object" && error !== null) || typeof error === "function"
+      ? error
+      : new Error(String(error));
+  committedWriteErrors.add(marked as object);
+  return marked;
+}
+
+function isCommittedWriteError(error: unknown): boolean {
+  return (
+    ((typeof error === "object" && error !== null) ||
+      typeof error === "function") &&
+    committedWriteErrors.has(error as object)
+  );
+}
+
 function atomicWrite(file: string, value: unknown): void {
   ensurePrivateDirectory(path.dirname(file));
   const temporary = path.join(
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`,
   );
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  fs.renameSync(temporary, file);
-  fs.chmodSync(file, 0o600);
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.chmodSync(temporary, 0o600);
+    try {
+      fs.renameSync(temporary, file);
+    } catch (error) {
+      throw fs.existsSync(file) ? markCommittedWrite(error) : error;
+    }
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporary);
+    } catch {
+      // Best-effort cleanup must not replace the publication error.
+    }
+    throw error;
+  }
 }
 
 function readJson(file: string): unknown {
@@ -197,7 +240,9 @@ function isMessage(value: unknown): value is TouchtoneMessage {
     isSession(message.sender) &&
     typeof message.recipientSessionId === "string" &&
     typeof message.message === "string" &&
-    typeof message.sentAt === "string"
+    typeof message.sentAt === "string" &&
+    (message.broadcastId === undefined ||
+      typeof message.broadcastId === "string")
   );
 }
 
@@ -377,6 +422,7 @@ export class TouchtoneStore {
     sender: TouchtoneSession,
     recipient: TouchtoneSession,
     message: string,
+    broadcastId?: string,
   ): string {
     const mail: TouchtoneMessage = {
       id: crypto.randomUUID(),
@@ -384,6 +430,7 @@ export class TouchtoneStore {
       recipientSessionId: recipient.sessionId,
       message,
       sentAt: new Date().toISOString(),
+      ...(broadcastId ? { broadcastId } : {}),
     };
     const filename = `${mail.sentAt.replaceAll(":", "-")}-${mail.id}.json`;
     atomicWrite(
@@ -391,6 +438,93 @@ export class TouchtoneStore {
       mail,
     );
     return mail.id;
+  }
+
+  broadcast(
+    sender: TouchtoneSession,
+    selectors: string[],
+    message: string,
+  ): BroadcastDetails {
+    const blankSelector = selectors.find((selector) => selector.trim() === "");
+    if (blankSelector !== undefined) {
+      throw new Error(
+        `Broadcast selectors must be non-blank; got ${JSON.stringify(blankSelector)}.`,
+      );
+    }
+    if (message.trim() === "") {
+      throw new Error("Broadcast message must be non-empty.");
+    }
+
+    const uniqueSelectors = [...new Set(selectors)];
+    const entries = this.phonebook();
+    const matchedBy: Record<string, number> = {};
+    const matched = new Map<string, TouchtoneSession>();
+
+    for (const selector of uniqueSelectors) {
+      const hits = entries.filter((entry) =>
+        entry.selectors.includes(selector),
+      );
+      matchedBy[selector] = hits.length;
+      for (const hit of hits) matched.set(hit.session.sessionId, hit.session);
+    }
+
+    const misses = uniqueSelectors.filter(
+      (selector) => matchedBy[selector] === 0,
+    );
+    if (misses.length > 0) {
+      throw new Error(
+        `No live sessions matched: ${misses.join(", ")}. Run touchtone list again. Nothing was sent.`,
+      );
+    }
+
+    const excludedSelf = matched.delete(sender.sessionId);
+    const recipients = [...matched.values()];
+    if (recipients.length === 0) {
+      throw new Error(
+        "Broadcast matched only the sender; no recipients after self-exclusion. Nothing was sent.",
+      );
+    }
+
+    const broadcastId = crypto.randomUUID();
+    const failed: { sessionId: string; error: string }[] = [];
+    const indeterminate: { sessionId: string; error: string }[] = [];
+    let delivered = 0;
+    for (const recipient of recipients) {
+      try {
+        this.send(sender, recipient, message, broadcastId);
+        delivered += 1;
+      } catch (error) {
+        const outcome = {
+          sessionId: recipient.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        };
+        if (isCommittedWriteError(error)) {
+          delivered += 1;
+          indeterminate.push(outcome);
+        } else {
+          failed.push(outcome);
+        }
+      }
+    }
+
+    if (delivered === 0) {
+      const errors = failed
+        .map(({ sessionId, error }) => `${sessionId}: ${error}`)
+        .join("; ");
+      throw new Error(
+        `Broadcast failed for all ${recipients.length} recipients: ${errors}`,
+      );
+    }
+
+    return {
+      broadcastId,
+      recipients,
+      matchedBy,
+      excludedSelf,
+      delivered,
+      failed,
+      ...(indeterminate.length > 0 ? { indeterminate } : {}),
+    };
   }
 
   consume(
