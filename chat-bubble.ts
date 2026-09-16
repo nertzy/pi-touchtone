@@ -20,8 +20,9 @@ export interface ChatIdentity {
 export function renderMailLabel(
   identity: ChatIdentity,
   expanded: boolean,
+  marker = "📞",
 ): string {
-  const icon = "📞";
+  const icon = marker;
   const name = identity.sessionName?.trim() || "unnamed session";
   return expanded
     ? `${icon} ${name} (${identity.sessionId}, pid ${identity.pid})`
