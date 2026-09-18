@@ -1987,6 +1987,44 @@ test("keeps unopened calls on deck until its matching custom message starts", as
   assert.match(result.content[0].text, /Message sent/);
 });
 
+test("arms the on-deck widget at arrival during a busy turn, before the sweep", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Arrived mid-turn",
+  });
+  // The poller notices the inbox file while bob is still busy: the widget
+  // arms at arrival, before any turn boundary hands the message to pi.
+  await waitFor(() => bob.widgetLines().length === 1);
+  assert.match(stripTerminalSequences(bob.widgetLines()[0]), /^📞 \.{1,3}$/);
+  assert.equal(bob.steered.length, 0);
+  assert.equal(bob.delivered.length, 0);
+
+  // The turn-end sweep hands off without double-counting the armed id ...
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.equal(bob.widgetLines().length, 1);
+  assert.match(stripTerminalSequences(bob.widgetLines()[0]), /^📞 \.{1,3}$/);
+
+  // ... and the matching message_start still clears it.
+  const queued = bob.steered[0].message;
+  await bob.event("message_start", {
+    message: { role: "custom", ...queued },
+  });
+  assert.deepEqual(bob.widgetLines(), []);
+});
+
 test("clears on-deck calls when SDK reports no pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);

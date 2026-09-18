@@ -633,22 +633,12 @@ export class TouchtoneStore {
     };
   }
 
-  consume(
+  /** Valid inbox messages awaiting handoff, oldest first. */
+  private scan(
     sessionId: string,
-    deliver: (messages: TouchtoneMessage[]) => void,
-  ): void {
+  ): { file: string; message: TouchtoneMessage }[] {
     const directory = this.inboxDirectory(sessionId);
     ensurePrivateDirectory(directory);
-
-    for (const file of [...this.handedOff]) {
-      try {
-        fs.unlinkSync(file);
-        this.handedOff.delete(file);
-      } catch (error) {
-        if (isErrno(error, "ENOENT")) this.handedOff.delete(file);
-      }
-    }
-
     const pending: { file: string; message: TouchtoneMessage }[] = [];
     for (const entry of fs.readdirSync(directory).sort()) {
       if (!entry.endsWith(".json") || entry.startsWith(".")) continue;
@@ -663,6 +653,28 @@ export class TouchtoneStore {
         // Leave unread messages in place for a later retry or manual inspection.
       }
     }
+    return pending;
+  }
+
+  /** Messages waiting in the inbox, without consuming them. */
+  peek(sessionId: string): TouchtoneMessage[] {
+    return this.scan(sessionId).map((entry) => entry.message);
+  }
+
+  consume(
+    sessionId: string,
+    deliver: (messages: TouchtoneMessage[]) => void,
+  ): void {
+    for (const file of [...this.handedOff]) {
+      try {
+        fs.unlinkSync(file);
+        this.handedOff.delete(file);
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) this.handedOff.delete(file);
+      }
+    }
+
+    const pending = this.scan(sessionId);
     if (pending.length === 0) return;
     try {
       deliver(pending.map((entry) => entry.message));
@@ -946,6 +958,24 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         return;
       }
       awaitingTurnEnd = true;
+      // Arm the handsets at arrival: mail sitting in the inbox during a busy
+      // turn is already pending, even though the turn-end sweep has not
+      // handed it to pi yet. Ids dedupe with the later sweep and the same
+      // message_start events clear them, so arming early cannot double-count
+      // or linger past delivery. Inbox files are written atomically, never
+      // retracted, and only leave through a successful sweep, so a peeked id
+      // always reaches one.
+      if (!sessionId) return;
+      let arrived = false;
+      for (const message of store.peek(sessionId)) {
+        if (unopened.has(message.id)) continue;
+        unopened.add(message.id);
+        arrived = true;
+      }
+      if (arrived) {
+        persistOnDeck();
+        updateOnDeck();
+      }
     };
 
     const stop = (): void => {
