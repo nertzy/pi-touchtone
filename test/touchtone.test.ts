@@ -1092,6 +1092,11 @@ test("error results keep the attempted bubble and reveal the example only when e
   assert.match(collapsed, /are you there\?/);
   assert.match(collapsed, /Not delivered/);
   assert.match(collapsed, /expand for details/);
+  const notDelivered = collapsed
+    .split("\n")
+    .find((line) => line.includes("Not delivered"));
+  assert.ok(notDelivered);
+  assert.match(notDelivered, /^\s+⚠ Not delivered$/);
   assert.doesNotMatch(collapsed, /found no live session/);
   assert.doesNotMatch(collapsed, /Example of a successful touchtone call/);
   assert.doesNotMatch(collapsed, /123e4567/);
@@ -1881,6 +1886,32 @@ test("renders incoming bubbles with theme colors and preserves outgoing colors",
   });
   assert.ok(wideGlyph.render(1).every((line) => visibleWidth(line) <= 1));
   assert.equal(stripTerminalSequences(wideGlyph.render(4)[0]), "👋");
+});
+
+test("paints failed outgoing bubbles with the theme's tool error colors", () => {
+  const themed = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    body: "never arrived",
+    failed: true,
+    theme: {
+      getFgAnsi: () => "\x1b[38;5;52m",
+      getBgAnsi: () => "\x1b[48;5;210m",
+    },
+  }).render(40);
+  assert.match(themed.join("\n"), ansi("\\[48;5;210m"));
+  assert.match(themed.join("\n"), ansi("\\[38;5;52m"));
+  // The corner fill matches the bubble background.
+  assert.match(themed[1], ansi("\\[38;5;210m"));
+
+  const fallback = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    body: "never arrived",
+    failed: true,
+  }).render(40);
+  assert.match(fallback.join("\n"), ansi("\\[48;5;210m"));
+  assert.doesNotMatch(fallback.join("\n"), ansi("\\[44m"));
 });
 
 test("shows exact identities only when bubble details are expanded", () => {

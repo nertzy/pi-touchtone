@@ -26,10 +26,11 @@ broker or a blocking request/reply protocol. The public package is
   placeholder values never fail a call. Errors still fail closed — a `send`
   whose locators resolve to zero or several sessions enqueues nothing — and
   every error ends with an example of a successful call. The collapsed tool
-  result stays terse: the attempted message bubble above a "Not delivered"
-  line (or a bare "Failed to send" summary when there is no message), plus
-  an "(expand for details)" hint; the full problem text and the example
-  render only in the expanded view.
+  result stays terse: the attempted message bubble in the theme's tool-error
+  color above a right-aligned "Not delivered" line (or a bare
+  "Failed to send" summary when there is no message), plus an
+  "(expand for details)" hint; the full problem text and the example render
+  only in the expanded view.
 - Pending incoming messages are handed to Pi as one batch. Idle sessions receive
   the batch immediately; calls for a busy session coalesce on disk and is handed
   off once at turn end. Delivery does not interrupt shell commands.

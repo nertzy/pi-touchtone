@@ -174,6 +174,20 @@ function splitExample(text: string): { problem: string; example?: string } {
   return { problem: text.slice(0, index), example: text.slice(index + 2) };
 }
 
+/** Renders a single right-aligned line, like the Sent status under a bubble. */
+function rightAlignedLine(text: string): Component {
+  return {
+    invalidate() {},
+    render(width: number): string[] {
+      const safeWidth = Math.max(1, width);
+      const clipped = truncateToWidth(text, safeWidth, "");
+      return [
+        `${" ".repeat(Math.max(0, safeWidth - visibleWidth(clipped)))}${clipped}`,
+      ];
+    },
+  };
+}
+
 /**
  * Destination locators are a common interface across actions: `to` and
  * `selectors` both accept any locator a session advertises (session id,
@@ -1032,18 +1046,19 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               label,
               body,
               styleLabel: (value) => theme.fg("toolOutput", value),
+              failed: true,
+              theme,
             }),
           );
+          // Right-aligned under the bubble, like the Sent status line.
+          failed.addChild(
+            rightAlignedLine(theme.fg("error", "⚠ Not delivered")),
+          );
           if (renderOptions.expanded) {
-            failed.addChild(
-              new Text(theme.fg("error", `⚠ Not delivered — ${problem}`), 1, 0),
-            );
+            failed.addChild(new Text(theme.fg("error", problem), 1, 0));
             if (example)
               failed.addChild(new Text(theme.fg("muted", example), 1, 0));
           } else {
-            failed.addChild(
-              new Text(theme.fg("error", "⚠ Not delivered"), 1, 0),
-            );
             failed.addChild(new Text(hint, 1, 0));
           }
           return failed;
