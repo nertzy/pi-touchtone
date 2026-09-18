@@ -633,22 +633,12 @@ export class TouchtoneStore {
     };
   }
 
-  consume(
+  /** Valid inbox messages awaiting handoff, oldest first. */
+  private scan(
     sessionId: string,
-    deliver: (messages: TouchtoneMessage[]) => void,
-  ): void {
+  ): { file: string; message: TouchtoneMessage }[] {
     const directory = this.inboxDirectory(sessionId);
     ensurePrivateDirectory(directory);
-
-    for (const file of [...this.handedOff]) {
-      try {
-        fs.unlinkSync(file);
-        this.handedOff.delete(file);
-      } catch (error) {
-        if (isErrno(error, "ENOENT")) this.handedOff.delete(file);
-      }
-    }
-
     const pending: { file: string; message: TouchtoneMessage }[] = [];
     for (const entry of fs.readdirSync(directory).sort()) {
       if (!entry.endsWith(".json") || entry.startsWith(".")) continue;
@@ -663,6 +653,28 @@ export class TouchtoneStore {
         // Leave unread messages in place for a later retry or manual inspection.
       }
     }
+    return pending;
+  }
+
+  /** Messages waiting in the inbox, without consuming them. */
+  peek(sessionId: string): TouchtoneMessage[] {
+    return this.scan(sessionId).map((entry) => entry.message);
+  }
+
+  consume(
+    sessionId: string,
+    deliver: (messages: TouchtoneMessage[]) => void,
+  ): void {
+    for (const file of [...this.handedOff]) {
+      try {
+        fs.unlinkSync(file);
+        this.handedOff.delete(file);
+      } catch (error) {
+        if (isErrno(error, "ENOENT")) this.handedOff.delete(file);
+      }
+    }
+
+    const pending = this.scan(sessionId);
     if (pending.length === 0) return;
     try {
       deliver(pending.map((entry) => entry.message));
@@ -812,22 +824,32 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     let consuming = false;
     let awaitingTurnEnd = false;
     const unopened = new Set<string>();
-    let queuedBeforeLastTurn = false;
+    // Handsets armed at arrival whose messages are still in the inbox: pi
+    // does not hold them yet, so they neither block an idle sweep nor count
+    // as stale pending messages at agent_end.
+    const peeked = new Set<string>();
+    // Handsets pi held at the last turn boundary; agent_end clears only these.
+    let handedOffAtTurnEnd: string[] = [];
+    const handedOff = (): string[] =>
+      [...unopened].filter((id) => !peeked.has(id));
 
     const onDeckFile = (): string | undefined =>
       sessionId ? store.onDeckFile(sessionId) : undefined;
 
     // Persist the queued message ids so /reload can re-arm the widget: the
     // inbox files are already deleted at handoff, but pi still holds the
-    // custom messages in its pending queue.
+    // custom messages in its pending queue. Best-effort: this is widget
+    // state, and callers run inside sweeps and watcher callbacks, so an I/O
+    // failure here must never block or abort message delivery.
     const persistOnDeck = (): void => {
       const file = onDeckFile();
       if (!file) return;
-      if (unopened.size === 0) {
-        fs.rmSync(file, { force: true });
-        return;
+      try {
+        if (unopened.size === 0) fs.rmSync(file, { force: true });
+        else atomicWrite(file, { ids: [...unopened] });
+      } catch {
+        // A stale or missing snapshot only affects re-arming after /reload.
       }
-      atomicWrite(file, { ids: [...unopened] });
     };
 
     const readOnDeckIds = (): Set<string> => {
@@ -871,6 +893,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     const clearOnDeck = (): void => {
       unopened.clear();
+      peeked.clear();
       persistOnDeck();
       if (context?.mode === "tui") {
         context.ui.setWidget("touchtone-on-deck", undefined);
@@ -916,7 +939,10 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       consuming = true;
       try {
         store.consume(sessionId, (messages) => {
-          for (const entry of messages) unopened.add(entry.id);
+          for (const entry of messages) {
+            unopened.add(entry.id);
+            peeked.delete(entry.id);
+          }
           persistOnDeck();
           updateOnDeck();
           try {
@@ -943,12 +969,33 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     const consume = (): void => {
       if (!context) return;
-      if (context.isIdle() && unopened.size === 0) {
+      if (context.isIdle() && handedOff().length === 0) {
         awaitingTurnEnd = false;
         sweep();
         return;
       }
       awaitingTurnEnd = true;
+      // Arm the handsets at arrival: mail sitting in the inbox during a busy
+      // turn is already pending, even though the turn-end sweep has not
+      // handed it to pi yet. Ids dedupe with the later sweep and the same
+      // message_start events clear them, so arming early cannot double-count
+      // or linger past delivery. Inbox files are written atomically, never
+      // retracted, and only leave through a successful sweep, so a peeked id
+      // always reaches one.
+      if (!sessionId) return;
+      let arrived = false;
+      for (const message of store.peek(sessionId)) {
+        // Peek skips handed-off files, so a peeked id is never held by pi —
+        // even one restored from on-deck state after a reload.
+        peeked.add(message.id);
+        if (unopened.has(message.id)) continue;
+        unopened.add(message.id);
+        arrived = true;
+      }
+      if (arrived) {
+        persistOnDeck();
+        updateOnDeck();
+      }
     };
 
     const stop = (): void => {
@@ -1392,8 +1439,10 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       const messages = inboxMessages(message.details);
       if (!messages) return;
       let cleared = false;
-      for (const entry of messages)
+      for (const entry of messages) {
         cleared = unopened.delete(entry.id) || cleared;
+        peeked.delete(entry.id);
+      }
       if (cleared) {
         persistOnDeck();
         updateOnDeck();
@@ -1406,19 +1455,23 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         awaitingTurnEnd = false;
         sweep();
       }
-      // Mark after the sweep so handsets queued by this turn boundary count
-      // as "queued before the last completed turn" at agent_end.
-      queuedBeforeLastTurn = unopened.size > 0;
+      // Snapshot after the sweep so handsets handed off at this boundary
+      // count as "queued before the last completed turn" at agent_end.
+      handedOffAtTurnEnd = handedOff();
     });
 
     pi.on("agent_end", async (_event, ctx) => {
       // Fallback for handsets whose messages were never picked up (e.g. the
       // run was aborted; pi#8349 can under-report pending messages then).
-      // Only applies to messages queued before the turn that just ended —
-      // handsets queued after it are still pending and must stay armed.
-      if (!queuedBeforeLastTurn) return;
-      queuedBeforeLastTurn = false;
-      if (!ctx.hasPendingMessages()) clearOnDeck();
+      // Only applies to the handsets pi held at the turn that just ended —
+      // calls arriving after it are still in the inbox and stay armed until
+      // the now-idle session sweeps them.
+      const stale = handedOffAtTurnEnd;
+      handedOffAtTurnEnd = [];
+      if (stale.length === 0 || ctx.hasPendingMessages()) return;
+      for (const id of stale) unopened.delete(id);
+      persistOnDeck();
+      updateOnDeck();
     });
 
     pi.on("session_start", async (_event, ctx) => {
@@ -1431,6 +1484,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       // under-reporting does not apply — aborts do not reload).
       const persistedIds = readOnDeckIds();
       unopened.clear();
+      peeked.clear();
+      handedOffAtTurnEnd = [];
       if (context.mode === "tui")
         context.ui.setWidget("touchtone-on-deck", undefined);
       store.initialize(sessionId);
@@ -1452,9 +1507,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     pi.on("session_shutdown", async () => {
       stop();
+      // clearOnDeck persists the empty set, which removes the snapshot.
       clearOnDeck();
-      const file = onDeckFile();
-      if (file) fs.rmSync(file, { force: true });
       if (sessionId) store.unregister(sessionId, pid);
     });
   };

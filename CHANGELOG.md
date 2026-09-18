@@ -17,6 +17,8 @@ Notable changes to `pi-touchtone` are documented here.
   background with a right-aligned "Not delivered" status.
 - Fixed the on-deck indicator disappearing after `/reload` while calls were
   still queued.
+- Fixed the on-deck indicator staying blank while calls waited in a busy
+  session's inbox; it now arms when a call arrives.
 
 ## [0.2.0] - 2026-09-16
 
