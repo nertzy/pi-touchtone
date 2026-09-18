@@ -15,6 +15,8 @@ Notable changes to `pi-touchtone` are documented here.
   "Failed to …" summary when there is no message), with details on expand.
 - Fixed failed outgoing bubbles looking like sent ones; they now use the error
   background with a right-aligned "Not delivered" status.
+- Fixed the on-deck indicator disappearing after `/reload` while calls were
+  still queued.
 
 ## [0.2.0] - 2026-09-16
 
