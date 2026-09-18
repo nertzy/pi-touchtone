@@ -10,6 +10,9 @@ Notable changes to `pi-touchtone` are documented here.
   placeholder values: blank locators are ignored, `to` and `selectors` accept
   any advertised phonebook value, `list` can filter the roster by locators, and
   every error ends with an example of a successful call.
+- Fixed collapsed failed-call results showing the full error text; they now
+  show the attempted message above a terse "Not delivered" line (or a one-line
+  "Failed to …" summary when there is no message), with details on expand.
 
 ## [0.2.0] - 2026-09-16
 
