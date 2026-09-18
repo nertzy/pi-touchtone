@@ -1091,8 +1091,8 @@ test("error results keep the attempted bubble and reveal the example only when e
   );
   assert.match(collapsed, /are you there\?/);
   assert.match(collapsed, /Not delivered/);
-  assert.match(collapsed, /found no live session/);
-  assert.match(collapsed, /expand for a working example/);
+  assert.match(collapsed, /expand for details/);
+  assert.doesNotMatch(collapsed, /found no live session/);
   assert.doesNotMatch(collapsed, /Example of a successful touchtone call/);
   assert.doesNotMatch(collapsed, /123e4567/);
 
@@ -1101,11 +1101,12 @@ test("error results keep the attempted bubble and reveal the example only when e
   );
   assert.match(expanded, /are you there\?/);
   assert.match(expanded, /Not delivered/);
+  assert.match(expanded, /found no live session/);
   assert.match(expanded, /Example of a successful touchtone call:/);
   assert.match(expanded, /123e4567-e89b-42d3-a456-426614174000/);
 
-  // Without a message there is no bubble, just the error; the example is
-  // still collapsed-only.
+  // Without a message there is no bubble, just a short summary; the problem
+  // text and example are still expanded-only.
   const noMessage = (await alice
     .tool({ action: "send", to: "dddddddd-dddd-dddd-dddd-dddddddddddd" })
     .then(
@@ -1114,20 +1115,42 @@ test("error results keep the attempted bubble and reveal the example only when e
       },
       (caught: unknown) => caught,
     )) as Error;
+  const noBubbleParams = {
+    action: "send",
+    to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+  };
   const noBubble = stripTerminalSequences(
     alice
       .renderToolResult(
         { content: [{ type: "text", text: noMessage.message }] },
-        { action: "send", to: "dddddddd-dddd-dddd-dddd-dddddddddddd" },
+        noBubbleParams,
         false,
         true,
       )
       .render(120)
       .join("\n"),
   );
-  assert.match(noBubble, /message is required for touchtone send/);
-  assert.match(noBubble, /expand for a working example/);
-  assert.doesNotMatch(noBubble, /Not delivered|Example of a successful/);
+  assert.match(noBubble, /Failed to send/);
+  assert.match(noBubble, /expand for details/);
+  assert.doesNotMatch(
+    noBubble,
+    /message is required|Not delivered|Example of a successful/,
+  );
+
+  const noBubbleExpanded = stripTerminalSequences(
+    alice
+      .renderToolResult(
+        { content: [{ type: "text", text: noMessage.message }] },
+        noBubbleParams,
+        true,
+        true,
+      )
+      .render(120)
+      .join("\n"),
+  );
+  assert.match(noBubbleExpanded, /Failed to send/);
+  assert.match(noBubbleExpanded, /message is required for touchtone send/);
+  assert.match(noBubbleExpanded, /Example of a successful touchtone call:/);
 });
 
 test("broadcast with a zero-match selector enqueues nothing and names it", async (t) => {
@@ -2062,11 +2085,15 @@ test("streams outgoing message text through Pi's tool execution lifecycle", asyn
     stripTerminalSequences,
   );
   const failureText = failureLines.join("\n");
-  // iMessage-style: the attempted bubble stays visible with the error beneath it.
+  // iMessage-style: the attempted bubble stays visible with a short failure
+  // line beneath it; the error detail itself waits for the expanded view.
   assert.match(failureText, /Never sent/);
   assert.match(failureText, /Not delivered/);
-  assert.match(failureText, /Recipient disappeared/);
-  assert.doesNotMatch(failureText, /Message sent|Delivered|Read/);
+  assert.match(failureText, /expand for details/);
+  assert.doesNotMatch(
+    failureText,
+    /Recipient disappeared|Message sent|Delivered|Read/,
+  );
 
   const replay = await alice.toolExecution({
     action: "send",
@@ -2153,10 +2180,11 @@ test("incoming and successful outgoing renderers use typed details without hidin
     false,
     true,
   );
-  assert.match(
-    stripTerminalSequences(failed.render(100).join("\n")),
-    /Recipient disappeared/,
-  );
+  const failedText = stripTerminalSequences(failed.render(100).join("\n"));
+  assert.match(failedText, /Never sent/);
+  assert.match(failedText, /Not delivered/);
+  assert.match(failedText, /expand for details/);
+  assert.doesNotMatch(failedText, /Recipient disappeared/);
 });
 
 test("a fresh installation uses the default inbox", () => {

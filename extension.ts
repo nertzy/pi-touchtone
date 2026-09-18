@@ -1001,18 +1001,23 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             | undefined;
           const body =
             typeof args?.message === "string" ? args.message.trim() : "";
+          // Collapsed stays terse: a one-line summary plus an expand hint.
+          // The full problem text and the working example render only when
+          // expanded; the model-facing error content is unaffected.
+          const hint = theme.fg("dim", "(expand for details)");
+          const detail = example
+            ? `${theme.fg("error", problem)}\n\n${theme.fg("muted", example)}`
+            : theme.fg("error", problem);
           if (!body) {
+            const summary =
+              args?.action === "send" || args?.action === "broadcast"
+                ? `⚠ Failed to ${args.action}`
+                : args?.action === "list"
+                  ? "⚠ Failed to list"
+                  : "⚠ touchtone call failed";
             if (!renderOptions.expanded)
-              return new Text(
-                example
-                  ? `${theme.fg("error", problem)}\n${theme.fg("dim", "(expand for a working example)")}`
-                  : theme.fg("error", problem),
-              );
-            return new Text(
-              example
-                ? `${theme.fg("error", problem)}\n\n${theme.fg("muted", example)}`
-                : theme.fg("error", problem),
-            );
+              return new Text(`${theme.fg("error", summary)}\n${hint}`);
+            return new Text(`${theme.fg("error", summary)}\n${detail}`);
           }
           // iMessage-style: the attempted bubble with the failure beneath it.
           const locators = collectLocators(args ?? {});
@@ -1029,19 +1034,18 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               styleLabel: (value) => theme.fg("toolOutput", value),
             }),
           );
-          failed.addChild(
-            new Text(theme.fg("error", `⚠ Not delivered — ${problem}`), 1, 0),
-          );
-          if (example)
+          if (renderOptions.expanded) {
             failed.addChild(
-              new Text(
-                renderOptions.expanded
-                  ? theme.fg("muted", example)
-                  : theme.fg("dim", "(expand for a working example)"),
-                1,
-                0,
-              ),
+              new Text(theme.fg("error", `⚠ Not delivered — ${problem}`), 1, 0),
             );
+            if (example)
+              failed.addChild(new Text(theme.fg("muted", example), 1, 0));
+          } else {
+            failed.addChild(
+              new Text(theme.fg("error", "⚠ Not delivered"), 1, 0),
+            );
+            failed.addChild(new Text(hint, 1, 0));
+          }
           return failed;
         }
         if (renderContext.args.action === "list" && result.details?.sessions) {

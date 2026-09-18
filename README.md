@@ -44,8 +44,9 @@ reaches every match and still fails without sending when any locator matches
 nothing. `send` and `broadcast` trim surrounding message whitespace and
 reject an empty or whitespace-only message. Every error ends with a full
 example of a successful call; the collapsed tool result keeps the attempted
-message bubble visible above a "Not delivered" line and reveals the example
-when expanded.
+message bubble visible above a short "Not delivered" line with an
+"(expand for details)" hint, and reveals the full problem text and example
+only when expanded.
 
 ## 📒 Phonebook / list
 
