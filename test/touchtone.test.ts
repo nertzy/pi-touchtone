@@ -2040,6 +2040,49 @@ test("keeps on-deck calls when SDK reports pending messages at agent end", async
   assert.equal(bob.widgetLines().length, 1);
 });
 
+test("on-deck state persists across reload while messages stay pending", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Survive reload",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.equal(bob.widgetLines().length, 1);
+  const onDeckFile = path.join(
+    root,
+    "on-deck",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.json",
+  );
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // Simulate /reload: session_start re-fires while the steered custom
+  // message is still pending (hasPendingMessages() === true), so the
+  // handset row is re-armed from the persisted ids.
+  await bob.event("session_start");
+  assert.equal(bob.widgetLines().length, 1);
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // If pi no longer holds the messages, session_start leaves the widget
+  // cleared and removes the stale file.
+  bob.finishTurn();
+  await bob.event("session_start");
+  assert.deepEqual(bob.widgetLines(), []);
+  assert.ok(!fs.existsSync(onDeckFile));
+});
+
 test("streams outgoing message text through Pi's tool execution lifecycle", async () => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);

@@ -108,6 +108,7 @@ export interface TouchtonePaths {
   sessions: string;
   inboxes: string;
   metadata: string;
+  onDeck: string;
 }
 
 export interface TouchtoneOptions {
@@ -122,6 +123,7 @@ export function getTouchtonePaths(root = resolveStoreRoot()): TouchtonePaths {
     sessions: path.join(root, "sessions"),
     inboxes: path.join(root, "inboxes"),
     metadata: path.join(root, "metadata"),
+    onDeck: path.join(root, "on-deck"),
   };
 }
 
@@ -395,6 +397,7 @@ export class TouchtoneStore {
     ensurePrivateDirectory(this.paths.root);
     ensurePrivateDirectory(this.paths.sessions);
     ensurePrivateDirectory(this.paths.inboxes);
+    ensurePrivateDirectory(this.paths.onDeck);
     if (sessionId) ensurePrivateDirectory(this.inboxDirectory(sessionId));
   }
 
@@ -407,6 +410,11 @@ export class TouchtoneStore {
 
   inboxDirectory(sessionId: string): string {
     return path.join(this.paths.inboxes, requireSessionId(sessionId));
+  }
+
+  /** Persisted on-deck widget state; kept outside the inbox sweep. */
+  onDeckFile(sessionId: string): string {
+    return path.join(this.paths.onDeck, `${requireSessionId(sessionId)}.json`);
   }
 
   metadataDirectory(sessionId: string): string {
@@ -801,6 +809,39 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     let consuming = false;
     let awaitingTurnEnd = false;
     const unopened = new Set<string>();
+    let queuedBeforeLastTurn = false;
+
+    const onDeckFile = (): string | undefined =>
+      sessionId ? store.onDeckFile(sessionId) : undefined;
+
+    // Persist the queued message ids so /reload can re-arm the widget: the
+    // inbox files are already deleted at handoff, but pi still holds the
+    // custom messages in its pending queue.
+    const persistOnDeck = (): void => {
+      const file = onDeckFile();
+      if (!file) return;
+      if (unopened.size === 0) {
+        fs.rmSync(file, { force: true });
+        return;
+      }
+      atomicWrite(file, { ids: [...unopened] });
+    };
+
+    const readOnDeckIds = (): Set<string> => {
+      const file = onDeckFile();
+      if (!file) return new Set();
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as {
+          ids?: unknown;
+        };
+        if (!Array.isArray(parsed.ids)) return new Set();
+        return new Set(
+          parsed.ids.filter((id): id is string => typeof id === "string"),
+        );
+      } catch {
+        return new Set();
+      }
+    };
 
     const updateOnDeck = (): void => {
       if (!context) return;
@@ -827,6 +868,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
 
     const clearOnDeck = (): void => {
       unopened.clear();
+      persistOnDeck();
       if (context?.mode === "tui") {
         context.ui.setWidget("touchtone-on-deck", undefined);
       }
@@ -872,6 +914,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       try {
         store.consume(sessionId, (messages) => {
           for (const entry of messages) unopened.add(entry.id);
+          persistOnDeck();
           updateOnDeck();
           try {
             pi.sendMessage(
@@ -885,6 +928,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             );
           } catch (error) {
             for (const entry of messages) unopened.delete(entry.id);
+            persistOnDeck();
             updateOnDeck();
             throw error;
           }
@@ -1343,26 +1387,51 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       let cleared = false;
       for (const entry of messages)
         cleared = unopened.delete(entry.id) || cleared;
-      if (cleared) updateOnDeck();
+      if (cleared) {
+        persistOnDeck();
+        updateOnDeck();
+      }
     });
 
     pi.on("turn_end", async () => {
-      if (!sessionId || !awaitingTurnEnd) return;
-      awaitingTurnEnd = false;
-      sweep();
+      if (!sessionId) return;
+      if (awaitingTurnEnd) {
+        awaitingTurnEnd = false;
+        sweep();
+      }
+      // Mark after the sweep so handsets queued by this turn boundary count
+      // as "queued before the last completed turn" at agent_end.
+      queuedBeforeLastTurn = unopened.size > 0;
     });
 
     pi.on("agent_end", async (_event, ctx) => {
+      // Fallback for handsets whose messages were never picked up (e.g. the
+      // run was aborted; pi#8349 can under-report pending messages then).
+      // Only applies to messages queued before the turn that just ended —
+      // handsets queued after it are still pending and must stay armed.
+      if (!queuedBeforeLastTurn) return;
+      queuedBeforeLastTurn = false;
       if (!ctx.hasPendingMessages()) clearOnDeck();
     });
 
     pi.on("session_start", async (_event, ctx) => {
       stop();
-      clearOnDeck();
       context = ctx;
       sessionId = requireSessionId(ctx.sessionManager.getSessionId());
+      // Re-arm the on-deck widget across /reload: snapshot the persisted ids
+      // before clearing in-memory state, then restore them only when pi
+      // still holds the queued custom messages (the pi#8349 abort
+      // under-reporting does not apply — aborts do not reload).
+      const persistedIds = readOnDeckIds();
+      unopened.clear();
+      if (context.mode === "tui")
+        context.ui.setWidget("touchtone-on-deck", undefined);
       store.initialize(sessionId);
       register();
+      if (ctx.hasPendingMessages())
+        for (const id of persistedIds) unopened.add(id);
+      persistOnDeck();
+      updateOnDeck();
       consume();
       watcher = fs.watch(store.inboxDirectory(sessionId), consume);
       poller = setInterval(consume, pollMs);
@@ -1377,6 +1446,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     pi.on("session_shutdown", async () => {
       stop();
       clearOnDeck();
+      const file = onDeckFile();
+      if (file) fs.rmSync(file, { force: true });
       if (sessionId) store.unregister(sessionId, pid);
     });
   };
