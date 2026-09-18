@@ -866,11 +866,43 @@ test("tool description documents broadcast selectors and untrusted content", () 
   );
 });
 
-test("broadcast rejects blank selectors and cross-action fields", async (t) => {
+test("tool calls tolerate padded fields and share destination locators", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
-  t.after(async () => alice.event("session_shutdown"));
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
   await alice.event("session_start");
+  await bob.event("session_start");
+
+  // list drops blank padding and still returns the full roster.
+  const list = await alice.tool({
+    action: "list",
+    to: "",
+    selectors: [""],
+    message: "",
+  });
+  assert.match(list.content[0].text, /Bob/);
+
+  // send drops blank selector padding; `to` and `selectors` both resolve to Bob.
+  const sent = await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    selectors: ["", "Bob"],
+    message: "hello",
+  });
+  assert.match(sent.content[0].text, /Message sent to Bob/);
+
+  // broadcast treats a padded `to` as one more locator and dedupes.
+  const broadcast = await alice.tool({
+    action: "broadcast",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    selectors: ["Bob"],
+    message: "group hello",
+  });
+  assert.match(broadcast.content[0].text, /delivered to 1\/1 sessions/);
 
   await assert.rejects(
     alice.tool({
@@ -878,26 +910,252 @@ test("broadcast rejects blank selectors and cross-action fields", async (t) => {
       selectors: ["  "],
       message: "hello",
     }),
-    /blank/i,
-  );
-  await assert.rejects(
-    alice.tool({
-      action: "broadcast",
-      to: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      selectors: ["Alice"],
-      message: "hello",
-    }),
-    /to is not valid/i,
+    (error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error);
+      assert.match(text, /selectors is required/);
+      assert.match(text, /Example of a successful touchtone call:/);
+      assert.match(text, /\{"action":"broadcast","selectors":\["E-123"\]/);
+      return true;
+    },
   );
   await assert.rejects(
     alice.tool({
       action: "send",
-      to: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      selectors: ["Alice"],
+      to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    }),
+    (error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error);
+      assert.match(text, /message is required for touchtone send/);
+      assert.match(text, /Example of a successful touchtone call:/);
+      assert.match(
+        text,
+        /\{"action":"send","to":"123e4567-e89b-42d3-a456-426614174000"/,
+      );
+      return true;
+    },
+  );
+});
+
+test("list filters the roster by locators and explains misses", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  const carol = harness("cccccccc-cccc-cccc-cccc-cccccccccccc", "Carol", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+    await carol.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  await carol.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.writeMetadata("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "ticket", {
+    ticket: "E-123",
+  });
+  store.writeMetadata("cccccccc-cccc-cccc-cccc-cccccccccccc", "ticket", {
+    ticket: "E-123",
+  });
+
+  const filtered = await alice.tool({ action: "list", selectors: ["E-123"] });
+  assert.match(filtered.content[0].text, /2 of 3 sessions matching "E-123"/);
+  assert.match(filtered.content[0].text, /Bob/);
+  assert.match(filtered.content[0].text, /Carol/);
+  assert.doesNotMatch(
+    filtered.content[0].text,
+    /aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/,
+  );
+  const details = filtered.details as { sessions: { sessionId: string }[] };
+  assert.equal(details.sessions.length, 2);
+
+  // `to` works as a filter locator too.
+  const viaTo = await alice.tool({ action: "list", to: "Bob" });
+  assert.match(viaTo.content[0].text, /1 of 3 sessions matching "Bob"/);
+  assert.match(viaTo.content[0].text, /Bob/);
+  assert.doesNotMatch(viaTo.content[0].text, /Carol/);
+
+  // A pure miss filters to an empty roster and says how to get the full one.
+  const empty = await alice.tool({ action: "list", selectors: ["ghost"] });
+  assert.match(empty.content[0].text, /0 of 3 sessions matching "ghost"/);
+  assert.match(empty.content[0].text, /No live session matched: "ghost"/);
+  assert.match(empty.content[0].text, /run list without locators/);
+
+  // A mixed call keeps the hits and names the miss.
+  const mixed = await alice.tool({
+    action: "list",
+    selectors: ["Bob", "ghost"],
+  });
+  assert.match(mixed.content[0].text, /1 of 3 sessions/);
+  assert.match(mixed.content[0].text, /Bob/);
+  assert.match(mixed.content[0].text, /No live session matched: "ghost"/);
+});
+
+test("send fails when locators resolve to more than one session", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  const carol = harness("cccccccc-cccc-cccc-cccc-cccccccccccc", "Carol", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+    await carol.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  await carol.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.writeMetadata("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "ticket", {
+    ticket: "E-123",
+  });
+  store.writeMetadata("cccccccc-cccc-cccc-cccc-cccccccccccc", "ticket", {
+    ticket: "E-123",
+  });
+
+  await assert.rejects(
+    alice.tool({ action: "send", selectors: ["E-123"], message: "hello" }),
+    (error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error);
+      assert.match(text, /delivers to exactly one session/);
+      assert.match(text, /resolve to 2/);
+      assert.match(
+        text,
+        /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb \(Bob\) via "E-123"/,
+      );
+      assert.match(
+        text,
+        /cccccccc-cccc-cccc-cccc-cccccccccccc \(Carol\) via "E-123"/,
+      );
+      assert.match(text, /"broadcast"/);
+      assert.match(text, /Example of a successful touchtone call:/);
+      return true;
+    },
+  );
+  for (const sessionId of [
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "cccccccc-cccc-cccc-cccc-cccccccccccc",
+  ]) {
+    assert.deepEqual(
+      fs
+        .readdirSync(store.inboxDirectory(sessionId))
+        .filter((entry) => entry.endsWith(".json")),
+      [],
+    );
+  }
+
+  await assert.rejects(
+    alice.tool({
+      action: "send",
+      to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
       message: "hello",
     }),
-    /selectors.*broadcast/i,
+    (error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error);
+      assert.match(
+        text,
+        /found no live session for "dddddddd-dddd-dddd-dddd-dddddddddddd"/,
+      );
+      assert.match(text, /touchtone list/);
+      assert.match(text, /Example of a successful touchtone call:/);
+      return true;
+    },
   );
+});
+
+test("error results keep the attempted bubble and reveal the example only when expanded", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+
+  const error = (await alice
+    .tool({
+      action: "send",
+      to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      message: "are you there?",
+    })
+    .then(
+      () => {
+        throw new Error("expected send to reject");
+      },
+      (caught: unknown) => caught,
+    )) as Error;
+  const result = { content: [{ type: "text", text: error.message }] };
+  const params = {
+    action: "send",
+    to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+    message: "are you there?",
+  };
+
+  const collapsed = stripTerminalSequences(
+    alice.renderToolResult(result, params, false, true).render(120).join("\n"),
+  );
+  assert.match(collapsed, /are you there\?/);
+  assert.match(collapsed, /Not delivered/);
+  assert.match(collapsed, /expand for details/);
+  const notDelivered = collapsed
+    .split("\n")
+    .find((line) => line.includes("Not delivered"));
+  assert.ok(notDelivered);
+  assert.match(notDelivered, /^\s+⚠ Not delivered$/);
+  assert.doesNotMatch(collapsed, /found no live session/);
+  assert.doesNotMatch(collapsed, /Example of a successful touchtone call/);
+  assert.doesNotMatch(collapsed, /123e4567/);
+
+  const expanded = stripTerminalSequences(
+    alice.renderToolResult(result, params, true, true).render(120).join("\n"),
+  );
+  assert.match(expanded, /are you there\?/);
+  assert.match(expanded, /Not delivered/);
+  assert.match(expanded, /found no live session/);
+  assert.match(expanded, /Example of a successful touchtone call:/);
+  assert.match(expanded, /123e4567-e89b-42d3-a456-426614174000/);
+
+  // Without a message there is no bubble, just a short summary; the problem
+  // text and example are still expanded-only.
+  const noMessage = (await alice
+    .tool({ action: "send", to: "dddddddd-dddd-dddd-dddd-dddddddddddd" })
+    .then(
+      () => {
+        throw new Error("expected send to reject");
+      },
+      (caught: unknown) => caught,
+    )) as Error;
+  const noBubbleParams = {
+    action: "send",
+    to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+  };
+  const noBubble = stripTerminalSequences(
+    alice
+      .renderToolResult(
+        { content: [{ type: "text", text: noMessage.message }] },
+        noBubbleParams,
+        false,
+        true,
+      )
+      .render(120)
+      .join("\n"),
+  );
+  assert.match(noBubble, /Failed to send/);
+  assert.match(noBubble, /expand for details/);
+  assert.doesNotMatch(
+    noBubble,
+    /message is required|Not delivered|Example of a successful/,
+  );
+
+  const noBubbleExpanded = stripTerminalSequences(
+    alice
+      .renderToolResult(
+        { content: [{ type: "text", text: noMessage.message }] },
+        noBubbleParams,
+        true,
+        true,
+      )
+      .render(120)
+      .join("\n"),
+  );
+  assert.match(noBubbleExpanded, /Failed to send/);
+  assert.match(noBubbleExpanded, /message is required for touchtone send/);
+  assert.match(noBubbleExpanded, /Example of a successful touchtone call:/);
 });
 
 test("broadcast with a zero-match selector enqueues nothing and names it", async (t) => {
@@ -1509,7 +1767,7 @@ test("uses private atomic storage and rejects path traversal and dead recipients
 
   await assert.rejects(
     alice.tool({ action: "send", to: "../../escape", message: "nope" }),
-    /valid session id/,
+    /found no live session/,
   );
 
   fs.writeFileSync(
@@ -1628,6 +1886,32 @@ test("renders incoming bubbles with theme colors and preserves outgoing colors",
   });
   assert.ok(wideGlyph.render(1).every((line) => visibleWidth(line) <= 1));
   assert.equal(stripTerminalSequences(wideGlyph.render(4)[0]), "👋");
+});
+
+test("paints failed outgoing bubbles with the theme's tool error colors", () => {
+  const themed = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    body: "never arrived",
+    failed: true,
+    theme: {
+      getFgAnsi: () => "\x1b[38;5;52m",
+      getBgAnsi: () => "\x1b[48;5;210m",
+    },
+  }).render(40);
+  assert.match(themed.join("\n"), ansi("\\[48;5;210m"));
+  assert.match(themed.join("\n"), ansi("\\[38;5;52m"));
+  // The corner fill matches the bubble background.
+  assert.match(themed[1], ansi("\\[38;5;210m"));
+
+  const fallback = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    body: "never arrived",
+    failed: true,
+  }).render(40);
+  assert.match(fallback.join("\n"), ansi("\\[48;5;210m"));
+  assert.doesNotMatch(fallback.join("\n"), ansi("\\[44m"));
 });
 
 test("shows exact identities only when bubble details are expanded", () => {
@@ -1756,6 +2040,49 @@ test("keeps on-deck calls when SDK reports pending messages at agent end", async
   assert.equal(bob.widgetLines().length, 1);
 });
 
+test("on-deck state persists across reload while messages stay pending", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Survive reload",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.equal(bob.widgetLines().length, 1);
+  const onDeckFile = path.join(
+    root,
+    "on-deck",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.json",
+  );
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // Simulate /reload: session_start re-fires while the steered custom
+  // message is still pending (hasPendingMessages() === true), so the
+  // handset row is re-armed from the persisted ids.
+  await bob.event("session_start");
+  assert.equal(bob.widgetLines().length, 1);
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // If pi no longer holds the messages, session_start leaves the widget
+  // cleared and removes the stale file.
+  bob.finishTurn();
+  await bob.event("session_start");
+  assert.deepEqual(bob.widgetLines(), []);
+  assert.ok(!fs.existsSync(onDeckFile));
+});
+
 test("streams outgoing message text through Pi's tool execution lifecycle", async () => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
@@ -1831,10 +2158,15 @@ test("streams outgoing message text through Pi's tool execution lifecycle", asyn
   const failureLines = (failed.render(100) as string[]).map(
     stripTerminalSequences,
   );
-  assert.match(failureLines.join("\n"), /Recipient disappeared/);
+  const failureText = failureLines.join("\n");
+  // iMessage-style: the attempted bubble stays visible with a short failure
+  // line beneath it; the error detail itself waits for the expanded view.
+  assert.match(failureText, /Never sent/);
+  assert.match(failureText, /Not delivered/);
+  assert.match(failureText, /expand for details/);
   assert.doesNotMatch(
-    failureLines.join("\n"),
-    /Never sent|Message sent|Sent|Delivered|Read|▗/,
+    failureText,
+    /Recipient disappeared|Message sent|Delivered|Read/,
   );
 
   const replay = await alice.toolExecution({
@@ -1922,10 +2254,11 @@ test("incoming and successful outgoing renderers use typed details without hidin
     false,
     true,
   );
-  assert.match(
-    stripTerminalSequences(failed.render(100).join("\n")),
-    /Recipient disappeared/,
-  );
+  const failedText = stripTerminalSequences(failed.render(100).join("\n"));
+  assert.match(failedText, /Never sent/);
+  assert.match(failedText, /Not delivered/);
+  assert.match(failedText, /expand for details/);
+  assert.doesNotMatch(failedText, /Recipient disappeared/);
 });
 
 test("a fresh installation uses the default inbox", () => {

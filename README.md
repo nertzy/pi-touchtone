@@ -26,15 +26,27 @@ Touchtone ships one tool, `touchtone`, with three actions:
 | Argument | `list` | `send` | `broadcast` |
 | --- | --- | --- | --- |
 | `action` | Required: `"list"` | Required: `"send"` | Required: `"broadcast"` |
-| `to` | Not used | Required: exact full session ID from `list` | Forbidden |
-| `selectors` | Not used | Forbidden | Required: nonempty string array |
-| `message` | Not used | Required: nonempty plain-text string | Required: nonempty plain-text string |
+| `to` | Optional: filter locator | One destination locator | One more destination locator |
+| `selectors` | Optional: filter locators | More destination locators | Destination locators |
+| `message` | Ignored | Required: nonempty plain-text string | Required: nonempty plain-text string |
 
-No other arguments are accepted. `send` and `broadcast` trim surrounding
-message whitespace and reject an empty or whitespace-only message. `send`
-accepts only an exact session ID; session names, shortened IDs, and
-pane/workspace handles are not direct-send addresses. Use `broadcast` selectors
-to address groups through those phonebook values.
+Destination locators are a common interface: a locator is any value a session
+advertises — an exact session ID, session name, working directory, PID, cmux
+pane/workspace/surface handle, or contributed metadata such as a ticket ID.
+`list` shows each session's copyable locator strings. The interface is
+permissive: blank locator strings are dropped, and `list` optionally filters
+the roster to sessions matching the given locators — a filter that matches
+nothing returns an empty roster with a note explaining how to get the full
+one. `send` requires the locators together to resolve to exactly one live
+session — if they resolve to several, the call fails, names the candidates,
+and suggests `broadcast`; if none resolve, run `list` again. `broadcast`
+reaches every match and still fails without sending when any locator matches
+nothing. `send` and `broadcast` trim surrounding message whitespace and
+reject an empty or whitespace-only message. Every error ends with a full
+example of a successful call; the collapsed tool result keeps the attempted
+message bubble visible (painted in the theme's tool-error color) above a
+right-aligned "Not delivered" line with an "(expand for details)" hint, and
+reveals the full problem text and example only when expanded.
 
 ## 📒 Phonebook / list
 
@@ -43,6 +55,16 @@ Ask your agent to list nearby sessions. It uses the `touchtone` tool:
 ```jsonc
 { "action": "list" }
 ```
+
+Pass locators in `to` or `selectors` to filter the roster to matching
+sessions:
+
+```jsonc
+{ "action": "list", "selectors": ["E-123"] }
+```
+
+A locator that matches no live session is named in the result and simply
+filters it out; the full roster is one bare `list` call away.
 
 The compact result shows a session count (the Phonebook). Expand it to see exact
 session IDs, names, PIDs, working directories, and available pane/workspace
@@ -56,8 +78,8 @@ session.
 
 ## 📞 Dialing out / send
 
-Copy the exact full recipient session ID from the Phonebook and supply a
-nonempty message:
+Copy the recipient's session ID from the Phonebook — or use any advertised
+locator, such as its session name — and supply a nonempty message:
 
 ```jsonc
 {
@@ -67,8 +89,8 @@ nonempty message:
 }
 ```
 
-The recipient must still appear in the live roster; otherwise `send` fails and
-you should run `list` again.
+The locators must resolve to exactly one live session; otherwise `send`
+fails, names what each locator matched, and you should run `list` again.
 
 Reply with another `send`. Sending returns after writing the message file;
 it does **not** wait for the recipient to read, acknowledge, or answer it.
@@ -156,7 +178,8 @@ Messages waiting on deck appear as a row of 📞 handsets with animated
 dots—not inside a bubble. The row shows up to five handsets, then `+N` for the
 rest. When Pi takes up a batch, its handsets leave the row and its stacked chat
 bubbles appear together. This reflects the local queue, not a read receipt from
-the other agent.
+the other agent. The queued handsets are persisted next to the inbox, so
+reloading Pi re-arms the same row whenever Pi still has the messages queued.
 
 **Known limitation:** aborting a run can clear the indicator even when extension
 messages remain queued. Pi’s pending-message API does not account for those
@@ -202,7 +225,7 @@ Comparison checked against **pi-intercom 0.13.0**:
 | --- | --- | --- |
 | Transport | Shared-file inboxes; no broker | Local IPC broker |
 | Agent interface | `list`, nonblocking `send`, and selector-based `broadcast` | Also blocking `ask`, reply tracking, and cancellation |
-| Addressing | Exact session IDs for `send`; phonebook metadata selectors for `broadcast` | Session names or IDs |
+| Addressing | Shared phonebook locators for `send` (must resolve to one session) and `broadcast` (reaches every match) | Session names or IDs |
 | Messages | Plain text | Text and attachments |
 | Delivery tracking | Inbox write, no receipt protocol | Delivery/read receipts and pending request state |
 | Interactive UI | Chat bubbles and an on-deck handset indicator | Keyboard-driven overlay and richer session controls |
