@@ -31,7 +31,7 @@ export function renderDialLabel(
 
 interface ChatBubbleTheme {
   getFgAnsi(color: "text"): string;
-  getBgAnsi(color: "customMessageBg"): string;
+  getBgAnsi(color: "customMessageBg" | "toolErrorBg"): string;
 }
 
 function backgroundToForeground(background: string): string {
@@ -45,6 +45,17 @@ function bubbleColors(options: ChatBubbleOptions) {
     const background = options.theme.getBgAnsi("customMessageBg");
     return {
       foreground: options.theme.getFgAnsi("text"),
+      background,
+      fill: backgroundToForeground(background),
+    };
+  }
+  if (options.failed) {
+    // Light red like a failed tool call, from the theme when available.
+    const background =
+      options.theme?.getBgAnsi?.("toolErrorBg") ?? "\x1b[48;5;210m";
+    return {
+      foreground:
+        options.theme?.getFgAnsi?.("text") ?? "\x1b[38;2;255;255;255m",
       background,
       fill: backgroundToForeground(background),
     };
@@ -67,7 +78,11 @@ type ChatBubbleOptions = {
   styleLabel?: (text: string) => string;
 } & (
   | { direction: "incoming"; theme: ChatBubbleTheme }
-  | { direction: "outgoing"; theme?: ChatBubbleTheme }
+  | {
+      direction: "outgoing";
+      theme?: Partial<ChatBubbleTheme>;
+      failed?: boolean;
+    }
 );
 
 export class ChatBubble implements Component {
