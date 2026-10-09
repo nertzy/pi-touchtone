@@ -4,6 +4,12 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added a `touchtone:on-deck` pi event carrying the number of received calls
+  still waiting for the model, so other extensions can mirror it (for example
+  as a terminal tab indicator).
+
 ### Fixed
 
 - Fixed touchtone calls failing when the model pads unused arguments with

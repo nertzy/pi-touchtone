@@ -20,6 +20,7 @@ import {
 } from "../chat-bubble.ts";
 import {
   createTouchtoneExtension,
+  ON_DECK_EVENT,
   resolveStoreRoot,
   type TouchtoneMessage,
   type TouchtoneSession,
@@ -536,7 +537,16 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
   let widget: HarnessComponent | undefined;
   let busy = false;
   let sendFailure: Error | undefined;
+  const emitted: Array<{ channel: string; data: unknown }> = [];
   const pi = {
+    events: {
+      emit(channel: string, data: unknown) {
+        emitted.push({ channel, data });
+      },
+      on() {
+        return () => {};
+      },
+    },
     getSessionName: () => name,
     on(
       event: string,
@@ -595,6 +605,11 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
   return {
     delivered,
     steered,
+    onDeckCounts() {
+      return emitted
+        .filter(({ channel }) => channel === ON_DECK_EVENT)
+        .map(({ data }) => (data as { count: number }).count);
+    },
     toolLabel() {
       const tool = tools.get("touchtone");
       assert.ok(tool);
@@ -2183,6 +2198,43 @@ test("agent_end clears stale handsets but keeps post-boundary arrivals armed", a
   bob.setBusy(false);
   await waitFor(() => bob.delivered.length === 1);
   assert.match(bob.delivered[0].message.content, /Arrived after the boundary/);
+});
+
+test("announces on-deck count changes on the pi event bus until delivery", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  for (const message of ["First", "Second"])
+    await alice.tool({
+      action: "send",
+      to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      message,
+    });
+  await waitFor(() => bob.onDeckCounts().at(-1) === 2);
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+
+  const queued = bob.steered[0].message;
+  await bob.event("message_start", { message: { role: "custom", ...queued } });
+  await bob.event("session_start");
+  await bob.event("session_shutdown");
+
+  // Arrival may land as one batch or two. The bus sees only changes:
+  // delivery announces zero once, a reload re-announces the current count,
+  // and shutdown stays quiet because nothing changed.
+  const counts = bob.onDeckCounts();
+  assert.ok(
+    ["0,2,0,0", "0,1,2,0,0"].includes(counts.join(",")),
+    `unexpected on-deck announcements: ${counts.join(",")}`,
+  );
 });
 
 test("clears on-deck calls when SDK reports no pending messages at agent end", async (t) => {
