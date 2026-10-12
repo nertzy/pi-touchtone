@@ -11,11 +11,23 @@ broker or a blocking request/reply protocol. The public package is
 
 - `list` returns live session IDs, names, process IDs, working directories, and
   available terminal workspace/pane handles.
-- `send` takes an exact recipient session ID and a plain-text message. Success
-  means the message was written to the recipient's inbox, not read or answered.
-- `broadcast` takes exact-equality metadata selectors and a plain-text message,
-  resolves their deduplicated union against the live phonebook, excludes the
-  sender, and writes one message per recipient with a shared `broadcastId`.
+- `send` takes destination locators — `to` and `selectors` are a common
+  interface holding any advertised phonebook value (session ID, name, cwd,
+  pid, terminal handle, or contributed metadata) — that together must resolve
+  to exactly one live session, plus a plain-text message. Success means the
+  message was written to the recipient's inbox, not read or answered.
+- `broadcast` takes the same locators (`selectors`, with a non-empty `to`
+  treated as one more) and a plain-text message, resolves their deduplicated
+  union against the live phonebook, excludes the sender, and writes one
+  message per recipient with a shared `broadcastId`.
+- The interface is deliberately permissive: `list` optionally filters the
+  roster by the same locators (naming any that match nothing) and ignores
+  `message`, and blank locators are dropped everywhere, so schema-padded
+  placeholder values never fail a call. Errors still fail closed — a `send`
+  whose locators resolve to zero or several sessions enqueues nothing — and
+  every error ends with an example of a successful call, which the collapsed
+  tool result only hints at (the attempted message bubble stays visible above
+  a "Not delivered" line) until expanded.
 - Pending incoming messages are handed to Pi as one batch. Idle sessions receive
   the batch immediately; calls for a busy session coalesce on disk and is handed
   off once at turn end. Delivery does not interrupt shell commands.
