@@ -9,6 +9,8 @@ Notable changes to `pi-touchtone` are documented here.
 - Added a `touchtone:on-deck` pi event carrying the number of received calls
   still waiting for the model, so other extensions can mirror it (for example
   as a terminal tab indicator).
+- Added pi-galley support: chat bubbles run against the terminal edges and wrap
+  at pi-galley's measure when it is narrower than 72% of the terminal.
 
 ### Fixed
 

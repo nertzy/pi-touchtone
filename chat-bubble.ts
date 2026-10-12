@@ -85,7 +85,20 @@ type ChatBubbleOptions = {
     }
 );
 
+// pi-galley's contract: a marked block stays full width, and the measure caps bubbles.
+// Both are global symbols, so they do nothing when pi-galley is not installed.
+const GALLEY_FULL_WIDTH = Symbol.for("pi-galley.full-width");
+const GALLEY_MEASURE = Symbol.for("pi-galley.measure");
+
+function galleyMeasure(): number {
+  const read = (globalThis as { [GALLEY_MEASURE]?: () => number })[
+    GALLEY_MEASURE
+  ];
+  return read?.() || Number.POSITIVE_INFINITY;
+}
+
 export class ChatBubble implements Component {
+  readonly [GALLEY_FULL_WIDTH] = true;
   private readonly options: ChatBubbleOptions;
 
   constructor(options: ChatBubbleOptions) {
@@ -108,9 +121,10 @@ export class ChatBubble implements Component {
         )
         .map((line) => align(paint(line), safeWidth, this.options.direction));
     }
+    const measure = galleyMeasure();
     const bubbleWidth = Math.max(
       4,
-      Math.min(safeWidth, Math.floor(safeWidth * 0.72)),
+      Math.min(safeWidth, Math.floor(safeWidth * 0.72), measure),
     );
     const contentWidth = Math.max(1, bubbleWidth - 4);
     const body = stripTerminalSequences(this.options.body);
@@ -121,7 +135,7 @@ export class ChatBubble implements Component {
     const actualBubbleWidth = Math.min(safeWidth, actualContentWidth + 4);
     const labelLines = wrapTextWithAnsi(
       stripTerminalSequences(this.options.label),
-      safeWidth,
+      Math.min(safeWidth, measure),
     ).map((line) => this.options.styleLabel?.(line) ?? line);
     const top = paintFill(`▗${"▄".repeat(actualBubbleWidth - 2)}▖`);
     const bottom = paintFill(`▝${"▀".repeat(actualBubbleWidth - 2)}▘`);
