@@ -87,6 +87,18 @@ export interface TouchtoneInboxDetails {
   messages: TouchtoneMessage[];
 }
 
+/**
+ * pi event-bus channel announcing how many received calls are waiting for
+ * the model. Emitted with {@link OnDeckEvent} whenever the count changes and
+ * once per session start, so extensions in the same pi process can mirror it
+ * (for example as a terminal tab indicator).
+ */
+export const ON_DECK_EVENT = "touchtone:on-deck";
+
+export interface OnDeckEvent {
+  count: number;
+}
+
 export interface BroadcastDetails {
   broadcastId: string;
   recipients: TouchtoneSession[];
@@ -832,6 +844,15 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     let handedOffAtTurnEnd: string[] = [];
     const handedOff = (): string[] =>
       [...unopened].filter((id) => !peeked.has(id));
+    let announcedOnDeck: number | undefined;
+
+    const announceOnDeck = (): void => {
+      if (unopened.size === announcedOnDeck) return;
+      announcedOnDeck = unopened.size;
+      pi.events.emit(ON_DECK_EVENT, {
+        count: unopened.size,
+      } satisfies OnDeckEvent);
+    };
 
     const onDeckFile = (): string | undefined =>
       sessionId ? store.onDeckFile(sessionId) : undefined;
@@ -869,6 +890,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     };
 
     const updateOnDeck = (): void => {
+      announceOnDeck();
       if (!context) return;
       if (context.mode !== "tui") return;
       if (unopened.size === 0) {
@@ -895,6 +917,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       unopened.clear();
       peeked.clear();
       persistOnDeck();
+      announceOnDeck();
       if (context?.mode === "tui") {
         context.ui.setWidget("touchtone-on-deck", undefined);
       }
@@ -1486,6 +1509,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       unopened.clear();
       peeked.clear();
       handedOffAtTurnEnd = [];
+      announcedOnDeck = undefined;
       if (context.mode === "tui")
         context.ui.setWidget("touchtone-on-deck", undefined);
       store.initialize(sessionId);

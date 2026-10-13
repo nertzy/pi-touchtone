@@ -159,6 +159,21 @@ Batches are intentionally unbounded so everything waiting plays in one turn. A
 very large batch therefore consumes proportional model context; caps are
 deferred until an overflow policy can preserve the one-turn guarantee.
 
+### On-deck event
+
+While calls wait for a busy session, a 📞 row sits above the editor. Other
+extensions in the same pi process can mirror that count, for example as a
+terminal tab indicator, by subscribing to the `touchtone:on-deck` event:
+
+```ts
+pi.events.on("touchtone:on-deck", ({ count }) => {
+  // count > 0: calls are waiting; 0: everything reached the model
+});
+```
+
+Touchtone emits `{ count }` whenever the count changes and once at every
+session start, so subscribers can reset stale state after a reload.
+
 ### Follow-on APIs do not ship yet
 
 “Phonebook” and “dialing out” above describe `list` and `send`, not additional
