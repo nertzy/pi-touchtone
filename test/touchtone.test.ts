@@ -1971,6 +1971,82 @@ test("renders incoming bubbles with theme colors and preserves outgoing colors",
   assert.equal(stripTerminalSequences(wideGlyph.render(4)[0]), "👋");
 });
 
+test("caps bubbles at pi-galley's measure against both terminal edges", (t) => {
+  const measureKey = Symbol.for("pi-galley.measure");
+  const registry = globalThis as { [measureKey]?: () => number };
+  registry[measureKey] = () => 40;
+  t.after(() => {
+    delete registry[measureKey];
+  });
+  const body = "word ".repeat(60).trim();
+  const label = "📞 Someone with a long session name ".repeat(3).trim();
+  const theme = {
+    getFgAnsi: () => "\x1b[39m",
+    getBgAnsi: () => "\x1b[49m",
+  };
+  const incoming = new ChatBubble({
+    direction: "incoming",
+    label,
+    body,
+    theme,
+  });
+  const outgoing = new ChatBubble({ direction: "outgoing", label, body });
+
+  for (const bubble of [incoming, outgoing]) {
+    assert.equal(
+      (bubble as unknown as Record<symbol, unknown>)[
+        Symbol.for("pi-galley.full-width")
+      ],
+      true,
+    );
+  }
+  const incomingLines = incoming.render(200).map(stripTerminalSequences);
+  assert.ok(incomingLines.every((line) => visibleWidth(line) <= 40));
+  assert.match(incomingLines[incomingLines.length - 1], /^▝▀+▘$/);
+  const outgoingLines = outgoing.render(200).map(stripTerminalSequences);
+  assert.ok(outgoingLines.every((line) => visibleWidth(line) === 200));
+  assert.ok(outgoingLines.every((line) => visibleWidth(line.trim()) <= 40));
+  assert.match(outgoingLines[outgoingLines.length - 1], /▝▀+▘$/);
+
+  registry[measureKey] = () => 0;
+  const offLines = outgoing.render(200).map(stripTerminalSequences);
+  assert.ok(visibleWidth(offLines[offLines.length - 1].trim()) > 100);
+});
+
+test("wraps bubbles at 72% of the width when pi-galley is not installed", () => {
+  assert.equal(
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-galley.measure")],
+    undefined,
+  );
+  const body = "word ".repeat(60).trim();
+  const theme = {
+    getFgAnsi: () => "\x1b[39m",
+    getBgAnsi: () => "\x1b[49m",
+  };
+  const incoming = new ChatBubble({
+    direction: "incoming",
+    label: "📞 Alice",
+    body,
+    theme,
+  });
+  const outgoing = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    body,
+  });
+
+  const incomingLines = incoming.render(200).map(stripTerminalSequences);
+  const bubbleWidth = visibleWidth(incomingLines[incomingLines.length - 1]);
+  assert.ok(bubbleWidth > 120 && bubbleWidth <= 144);
+  assert.match(incomingLines[incomingLines.length - 1], /^▝▀+▘$/);
+  const outgoingLines = outgoing.render(200).map(stripTerminalSequences);
+  assert.ok(outgoingLines.every((line) => visibleWidth(line) === 200));
+  assert.equal(
+    visibleWidth(outgoingLines[outgoingLines.length - 1].trim()),
+    bubbleWidth,
+  );
+});
+
 test("paints failed outgoing bubbles with the theme's tool error colors", () => {
   // Each token maps to a distinct code, so requesting the wrong token shows
   // up in the output as well as in the recorded calls.

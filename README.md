@@ -189,6 +189,11 @@ colors. Sender labels sit outside the bubbles. Outgoing text appears while the
 agent composes the tool call; a successful inbox write adds “Sent,” not a read
 receipt. Expand a message to see its exact session ID and delivery details.
 
+With [pi-galley](https://github.com/nertzy/pi-galley) installed, bubbles span
+the whole terminal, outgoing against the right edge and incoming against the
+left. They wrap at pi-galley's measure when it is narrower than their usual 72%
+of the terminal.
+
 Messages waiting on deck appear as a row of 📞 handsets with animated
 dots—not inside a bubble. The row shows up to five handsets, then `+N` for the
 rest. When Pi takes up a batch, its handsets leave the row and its stacked chat
