@@ -4,6 +4,8 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
 ### Added
 
 - Added a `touchtone:on-deck` pi event carrying the number of received calls
