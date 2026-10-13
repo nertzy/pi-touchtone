@@ -2073,6 +2073,118 @@ test("keeps unopened calls on deck until its matching custom message starts", as
   assert.match(result.content[0].text, /Message sent/);
 });
 
+test("arms the on-deck widget at arrival during a busy turn, before the sweep", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Arrived mid-turn",
+  });
+  // The poller notices the inbox file while bob is still busy: the widget
+  // arms at arrival, before any turn boundary hands the message to pi.
+  await waitFor(() => bob.widgetLines().length === 1);
+  assert.match(stripTerminalSequences(bob.widgetLines()[0]), /^📞 \.{1,3}$/);
+  assert.equal(bob.steered.length, 0);
+  assert.equal(bob.delivered.length, 0);
+
+  // The turn-end sweep hands off without double-counting the armed id ...
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.equal(bob.widgetLines().length, 1);
+  assert.match(stripTerminalSequences(bob.widgetLines()[0]), /^📞 \.{1,3}$/);
+
+  // ... and the matching message_start still clears it.
+  const queued = bob.steered[0].message;
+  await bob.event("message_start", {
+    message: { role: "custom", ...queued },
+  });
+  assert.deepEqual(bob.widgetLines(), []);
+});
+
+test("delivers a call that arrives after the final turn boundary once idle", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  // The call lands between the last turn_end and agent_end: armed at
+  // arrival, but no further turn boundary will sweep it.
+  await bob.event("turn_end");
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "After the last turn",
+  });
+  await waitFor(() => bob.widgetLines().length === 1);
+  await bob.event("agent_end");
+  assert.equal(bob.widgetLines().length, 1);
+
+  // The armed handset must not block the idle sweep.
+  bob.setBusy(false);
+  await waitFor(() => bob.delivered.length === 1);
+  assert.match(bob.delivered[0].message.content, /After the last turn/);
+});
+
+test("agent_end clears stale handsets but keeps post-boundary arrivals armed", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Handed off, then dropped",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  // pi drops the handed-off call (pi#8349), then a new one arrives before
+  // agent_end.
+  bob.discardPending();
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Arrived after the boundary",
+  });
+  await waitFor(
+    () =>
+      !/^📞 \.{1,3}$/.test(stripTerminalSequences(bob.widgetLines()[0] ?? "")),
+  );
+
+  await bob.event("agent_end");
+  assert.match(
+    stripTerminalSequences(bob.widgetLines()[0] ?? ""),
+    /^📞 \.{1,3}$/,
+  );
+
+  bob.setBusy(false);
+  await waitFor(() => bob.delivered.length === 1);
+  assert.match(bob.delivered[0].message.content, /Arrived after the boundary/);
+});
+
 test("clears on-deck calls when SDK reports no pending messages at agent end", async (t) => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
@@ -2124,6 +2236,101 @@ test("keeps on-deck calls when SDK reports pending messages at agent end", async
 
   await bob.event("agent_end");
   assert.equal(bob.widgetLines().length, 1);
+});
+
+test("on-deck persistence failures never block delivery", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+
+  // A regular file where the on-deck directory belongs makes every snapshot
+  // write fail, even when the tests run as root.
+  const onDeck = path.join(root, "on-deck");
+  fs.rmSync(onDeck, { recursive: true, force: true });
+  fs.writeFileSync(onDeck, "not a directory");
+
+  bob.setBusy(true);
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Busy hand-off",
+  });
+  await waitFor(() => bob.widgetLines().length === 1);
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.match(bob.steered[0].message.content, /Busy hand-off/);
+
+  bob.finishTurn();
+  await bob.event("agent_end");
+  bob.setBusy(false);
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Idle delivery",
+  });
+  await waitFor(() => bob.delivered.length === 2);
+  assert.match(bob.delivered[1].message.content, /Idle delivery/);
+
+  await bob.event("session_shutdown");
+});
+
+test("on-deck state persists across reload while messages stay pending", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  bob.setBusy(true);
+
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Survive reload",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await bob.event("turn_end");
+  await waitFor(() => bob.steered.length === 1);
+  assert.equal(bob.widgetLines().length, 1);
+  const onDeckFile = path.join(
+    root,
+    "on-deck",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.json",
+  );
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // Simulate /reload: session_start re-fires while the steered custom
+  // message is still pending (hasPendingMessages() === true), so the
+  // handset row is re-armed from the persisted ids.
+  await bob.event("session_start");
+  assert.equal(bob.widgetLines().length, 1);
+  assert.ok(fs.existsSync(onDeckFile));
+
+  // If pi no longer holds the messages, session_start leaves the widget
+  // cleared and removes the stale file.
+  bob.finishTurn();
+  await bob.event("session_start");
+  assert.deepEqual(bob.widgetLines(), []);
+  assert.ok(!fs.existsSync(onDeckFile));
+
+  // session_shutdown removes the snapshot even while handsets are armed.
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Queued at shutdown",
+  });
+  await waitFor(() => fs.existsSync(onDeckFile));
+  await bob.event("session_shutdown");
+  assert.ok(!fs.existsSync(onDeckFile));
 });
 
 test("streams outgoing message text through Pi's tool execution lifecycle", async () => {

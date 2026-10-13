@@ -178,7 +178,9 @@ Messages waiting on deck appear as a row of 📞 handsets with animated
 dots—not inside a bubble. The row shows up to five handsets, then `+N` for the
 rest. When Pi takes up a batch, its handsets leave the row and its stacked chat
 bubbles appear together. This reflects the local queue, not a read receipt from
-the other agent.
+the other agent. The queued handsets are persisted to
+`on-deck/<session-id>.json` under the store root, so reloading Pi re-arms the
+same row whenever Pi still has the messages queued.
 
 **Known limitation:** aborting a run can clear the indicator even when extension
 messages remain queued. Pi’s pending-message API does not account for those

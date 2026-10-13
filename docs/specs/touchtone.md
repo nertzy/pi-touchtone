@@ -41,7 +41,10 @@ Messages use left-aligned incoming and right-aligned outgoing chat bubbles.
 Incoming colors follow Pi's theme; outgoing bubbles use white on terminal blue.
 Outgoing text appears while tool arguments stream in, and successful sends show
 “Sent.” Pending incoming messages appear as at most five handsets plus an
-overflow count and animated dots.
+overflow count and animated dots. The queued handset IDs persist to
+`on-deck/<session-id>.json` under the store root, outside the inbox, on every
+change, so `/reload` re-arms the same row whenever Pi still reports the
+messages pending; `session_shutdown` removes the file.
 
 ## Storage and trust boundary
 
@@ -50,7 +53,8 @@ absolute `PI_TOUCHTONE_HOME`, then `$XDG_STATE_HOME/pi/touchtone` when
 `XDG_STATE_HOME` is absolute and either that path exists or the legacy root does
 not, then the legacy `~/.local/state/pi/touchtone`. Existing installations keep
 the legacy root without migration. The root contains owner-only `sessions/`,
-`inboxes/`, and `metadata/` directories and owner-readable/writable files.
+`inboxes/`, `metadata/`, and `on-deck/` directories and owner-readable/writable
+files.
 
 Phonebook contributors publish flat string or string-array JSON records under
 `metadata/<session-id>/<publisher>.json`. Atomic file writes avoid exposing
@@ -77,6 +81,8 @@ that one-turn behavior.
 - Pi's pending-message API can omit queued custom messages after an abort. The
   pending indicator can disappear while a message remains queued; this is not a
   delivery acknowledgment. See [Pi issue #8349](https://github.com/earendil-works/pi/issues/8349).
+  The same API gates the on-deck restore across reloads: if Pi itself has
+  dropped the pending queue, the handsets stay down with the messages.
 - Sender-facing pickup receipts are deferred to
   [issue #2](https://github.com/nertzy/pi-touchtone/issues/2).
 - Operator-assisted routing, callback shortcuts, independent live endpoint
