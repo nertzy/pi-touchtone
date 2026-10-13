@@ -13,6 +13,8 @@ Notable changes to `pi-touchtone` are documented here.
 - Fixed collapsed failed-call results showing the full error text; they now
   show the attempted message above a terse "Not delivered" line (or a one-line
   "Failed to …" summary when there is no message), with details on expand.
+- Fixed failed outgoing bubbles looking like sent ones; they now use the error
+  background with a right-aligned "Not delivered" status.
 
 ## [0.2.0] - 2026-09-16
 
