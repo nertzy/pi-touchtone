@@ -2,6 +2,32 @@
 
 Notable changes to `pi-touchtone` are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Added a `touchtone:on-deck` pi event carrying the number of received calls
+  still waiting for the model, so other extensions can mirror it (for example
+  as a terminal tab indicator).
+- Added pi-galley support: chat bubbles run against the terminal edges and wrap
+  at pi-galley's measure when it is narrower than 72% of the terminal.
+
+### Fixed
+
+- Fixed touchtone calls failing when the model pads unused arguments with
+  placeholder values: blank locators are ignored, `to` and `selectors` accept
+  any advertised phonebook value, `list` can filter the roster by locators, and
+  every error ends with an example of a successful call.
+- Fixed collapsed failed-call results showing the full error text; they now
+  show the attempted message above a terse "Not delivered" line (or a one-line
+  "Failed to …" summary when there is no message), with details on expand.
+- Fixed failed outgoing bubbles looking like sent ones; they now use the error
+  background with a right-aligned "Not delivered" status.
+- Fixed the on-deck indicator disappearing after `/reload` while calls were
+  still queued.
+- Fixed the on-deck indicator staying blank while calls waited in a busy
+  session's inbox; it now arms when a call arrives.
+
 ## [0.2.0] - 2026-09-16
 
 ### Added
