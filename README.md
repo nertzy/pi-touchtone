@@ -31,8 +31,8 @@ Touchtone ships one tool, `touchtone`, with three actions:
 | `message` | Ignored | Required: nonempty plain-text string | Required: nonempty plain-text string |
 
 Destination locators are a common interface: a locator is any value a session
-advertises — an exact session ID, session name, working directory, PID, cmux
-pane/workspace/surface handle, or contributed metadata such as a ticket ID.
+advertises — an exact session ID, session name, working directory, PID,
+terminal handle, launch value, or contributed metadata such as a ticket ID.
 `list` shows each session's copyable locator strings. The interface is
 permissive: blank locator strings are dropped, and `list` optionally filters
 the roster to sessions matching the given locators — a filter that matches
@@ -67,7 +67,7 @@ A locator that matches no live session is named in the result and simply
 filters it out; the full roster is one bare `list` call away.
 
 The compact result shows a session count (the Phonebook). Expand it to see exact
-session IDs, names, PIDs, working directories, and available pane/workspace
+session IDs, names, PIDs, working directories, and available terminal
 handles in a table. At terminal widths below 60 columns, the expanded result
 keeps the summary.
 
@@ -75,6 +75,29 @@ The model-facing result also uses the Phonebook heading and lists those session
 details. Each entry includes a JSON `selectors` array whose strings can be
 copied directly into a `broadcast` call. The roster includes the current
 session.
+
+### Terminal handles
+
+Touchtone reads these environment variables, trims their values, and advertises
+non-blank values as terminal handles:
+
+| Terminal | Environment variables | Handle names (in the same order) |
+| --- | --- | --- |
+| cmux | `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, `CMUX_PANEL_ID` | `cmux.workspace`, `cmux.surface`, `cmux.panel` |
+| herdr | `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID` | `herdr.workspace`, `herdr.tab`, `herdr.pane` |
+| tmux | `TMUX_PANE` | `tmux.pane` |
+| zellij | `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID` | `zellij.session`, `zellij.pane` |
+| WezTerm | `WEZTERM_PANE` | `wezterm.pane` |
+| kitty | `KITTY_WINDOW_ID` | `kitty.window` |
+
+**Children and subshells inherit the same terminal handles.** `send` refuses
+an ambiguous handle; `broadcast` reaches all matching sessions, including
+children (excluding the sender). Use a session ID to address one session.
+
+Selectors use the raw handle values, not the handle names. Values are unique
+only within a terminal instance or server, not across all running terminals.
+Adding a prefix would not fix collisions between two instances of the same
+terminal: both could advertise `kitty:1`.
 
 ## 📞 Dialing out / send
 
@@ -101,7 +124,7 @@ There is no `ask` action or reply correlation.
 Party Line is group messaging: the `broadcast` action sends one message to the
 union of every session selected by the
 provided values. Each selector exactly equals one phonebook value: a session
-ID, name, working directory, PID string, cmux workspace/surface/panel ID, or
+ID, name, working directory, PID string, terminal handle, launch value, or
 contributed metadata such as a ticket ID. Overlapping matches are deduplicated,
 and the sending session is excluded.
 
@@ -110,7 +133,8 @@ and the sending session is excluded.
   "action": "broadcast",
   "selectors": [
     "recipient-session-id",
-    "A32F82F2-DEA3-41ED-8B0B-9DFCD016C110",
+    "A32F82F2-DEA3-41ED-8B0B-9DFCD016C110", // cmux workspace handle
+    "wE:p2", // herdr pane handle
     "E-123"
   ],
   "message": "Standup update: the integration is ready for review."
@@ -127,7 +151,7 @@ Party-line calls come in with the 📣 glyph; direct dials remain 📞.
 
 ## Phonebook metadata
 
-Other tools can add addressable values without coupling Touchtone to cmux or a
+Other tools can add addressable values without coupling Touchtone to a terminal or a
 specific tracker. Publish a flat JSON object at
 `<store>/metadata/<session-id>/<publisher>.json`; values are strings or arrays
 of strings:
@@ -145,6 +169,64 @@ same key for a session, the publisher whose name sorts first lexically wins.
 Core field names are reserved; colliding sidecar keys are ignored. Contributions
 apply only to live rostered sessions. Malformed sidecars and files larger than
 64 KB are skipped.
+
+### Launching child sessions
+
+Launchers can set `PI_TOUCHTONE_METADATA` to a UTF-8 JSON object of at most
+64 KB. Touchtone retains only non-blank string values, trimming surrounding
+whitespace; other values are ignored. Each retained value is an additional
+exact-match selector, except `parentSessionId`, which records a relationship
+and is **not dialable**. Launch values can collide with session IDs or names;
+`send` still requires exactly one matching live session.
+
+For example, launch a child with:
+
+```sh
+PI_TOUCHTONE_METADATA='{"agent":"reviewer","runId":"review-42","parentSessionId":"parent-a"}' pi
+```
+
+The caller must replace `parent-a` with the actual immediate parent's Pi
+session ID. `agent` and `runId` let you dial an agent or broadcast to a run.
+Any other retained string value is also dialable.
+
+Touchtone also recognizes these pi-cohort launch inputs:
+
+| Variable | Meaning |
+| --- | --- |
+| `PI_SUBAGENT_CHILD=1` | Enables reading the following `PI_SUBAGENT_*` values |
+| `PI_SUBAGENT_CHILD_AGENT` | Maps to `agent` |
+| `PI_SUBAGENT_RUN_ID` | Maps to `runId` |
+| `PI_SUBAGENT_PARENT_SESSION_ID` | Maps to non-dialable `parentSessionId`; **proposed**, not current pi-cohort support |
+
+Retained generic values override these gated inputs per key. A blank or
+non-string generic value does not erase a valid pi-cohort value. Invalid JSON,
+`null`, arrays, other non-object inputs, and oversized objects contribute no
+generic values and trigger one warning per process without preventing
+registration; valid pi-cohort values still apply.
+
+Launch state is captured at first registration and survives `/reload`, `/new`,
+and `/resume` for that process; these operations do not reread launcher input.
+Touchtone removes `PI_TOUCHTONE_METADATA` from the process environment at first
+registration, so subsequent child processes do not inherit it. Renaming a
+session preserves its launch state too.
+
+When a parent marker is present, `list` shows these annotations in both its
+model-facing text and expanded table:
+
+- `spawned by <parent name> (<parent id>)` for a live, named parent.
+- `spawned by <parent id>` for a live, unnamed parent.
+- `spawned by <parent id> (not live)` when the parent ID is not in the roster.
+
+A parent marker equal to the current session's own ID is ignored. The marker
+records the parent's session ID at launch: it does not migrate when the parent
+uses `/new` or `/resume`. The old ID becomes `(not live)` even if that parent
+process is still running under a new ID. Without a parent marker there is no
+spawned-by annotation, but agent and run values remain dialable.
+
+Touchtone leaves `PI_SUBAGENT_*` untouched. A Pi started from a child's shell
+inherits them, and nested pi-cohort children whose launch omits agent or run
+inputs inherit those values too. Broadcasts by run ID include those sessions;
+this existing inheritance limitation is not repaired by Touchtone.
 
 ## Receiving automatically
 
