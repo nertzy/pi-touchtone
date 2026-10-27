@@ -801,7 +801,14 @@ type HarnessTool = {
   }>;
 };
 
-function harness(id: string, name: string, root: string, pid = process.pid) {
+function harness(
+  id: string,
+  name: string,
+  root: string,
+  pid = process.pid,
+  factory = createTouchtoneExtension,
+) {
+  const notifications: Array<{ message: string; severity: string }> = [];
   const handlers = new Map<
     string,
     Array<(event: unknown, context: unknown) => Promise<void>>
@@ -861,7 +868,7 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
       else delivered.push({ message, options });
     },
   };
-  createTouchtoneExtension({ root, pid, pollMs: 20 })(pi as never);
+  factory({ root, pid, pollMs: 20 })(pi as never);
   const context = {
     cwd: path.join(os.tmpdir(), name),
     mode: "tui",
@@ -869,6 +876,9 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
     hasPendingMessages: () => steered.length > 0,
     isIdle: () => !busy,
     ui: {
+      notify(message: string, severity: string) {
+        notifications.push({ message, severity });
+      },
       setWidget(
         _key: string,
         factory:
@@ -890,6 +900,13 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
   return {
     delivered,
     steered,
+    notifications,
+    setSessionId(value: string) {
+      id = value;
+    },
+    setSessionName(value: string) {
+      name = value;
+    },
     onDeckCounts() {
       return emitted
         .filter(({ channel }) => channel === ON_DECK_EVENT)
@@ -2943,3 +2960,119 @@ test("a fresh installation uses the default inbox", () => {
   assert.equal(fs.statSync(path.join(root, "sessions")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(root, "inboxes")).isDirectory(), true);
 });
+
+test("registration snapshots launch identity across switches, rename, and fresh-module reload", async () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  Object.assign(process.env, cohortEnv, {
+    PI_TOUCHTONE_METADATA: '{"agent":"generic","parentSessionId":"parent-a"}',
+    HERDR_PANE_ID: "pane-a",
+  });
+  const child = harness("child-a", "Child", root);
+  let reloaded: ReturnType<typeof harness> | undefined;
+  try {
+    assert.ok(process.env.PI_TOUCHTONE_METADATA);
+    assert.equal(globals[launchSlot], undefined);
+    assert.deepEqual(child.notifications, []);
+    await child.event("session_start");
+    const expectedLaunch = { agent: "generic", runId: "run" };
+    const current = () => store.liveSessions()[0];
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    assert.equal(process.env.PI_TOUCHTONE_METADATA, undefined);
+    for (const [key, value] of Object.entries(cohortEnv))
+      assert.equal(process.env[key], value);
+    process.env.PI_SUBAGENT_RUN_ID = "changed";
+    process.env.HERDR_PANE_ID = "pane-b";
+    await child.event("session_start");
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.deepEqual(current().handles, { "herdr.pane": "pane-b" });
+    for (const [previous, next, parent] of [
+      ["child-a", "parent-a", undefined],
+      ["parent-a", "child-b", "parent-a"],
+    ] as const) {
+      child.setSessionId(next);
+      await child.event("session_start");
+      assert.equal(fs.existsSync(store.rosterFile(previous)), false);
+      assert.deepEqual(
+        store.phonebook().map(({ session }) => session.sessionId),
+        [next],
+      );
+      assert.equal(current().parentSessionId, parent);
+      assert.deepEqual(current().launch, expectedLaunch);
+    }
+    child.setSessionName("Renamed");
+    await child.event("session_info_changed");
+    assert.equal(current().sessionName, "Renamed");
+    assert.deepEqual(current().handles, { "herdr.pane": "pane-b" });
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    await child.event("session_shutdown");
+    const fresh = await import(
+      `${pathToFileURL(path.resolve("extension.ts")).href}?launch-reload`
+    );
+    reloaded = harness(
+      "child-b",
+      "Reloaded",
+      root,
+      process.pid,
+      fresh.createTouchtoneExtension,
+    );
+    await reloaded.event("session_start");
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    store.initialize("sender");
+    store.register(rosterSession("sender"));
+    const outcome = store.broadcast(rosterSession("sender"), ["run"], "hello");
+    assert.equal(outcome.delivered, 1);
+  } finally {
+    await child.event("session_shutdown");
+    await reloaded?.event("session_shutdown");
+  }
+});
+
+for (const raw of ["{broken", "null"]) {
+  test(`invalid launch ${raw} warns once across registration and fresh-module reload`, async () => {
+    Object.assign(process.env, cohortEnv, { PI_TOUCHTONE_METADATA: raw });
+    const root = temporaryRoot();
+    const child = harness("child", "Child", root);
+    let reloaded: ReturnType<typeof harness> | undefined;
+    try {
+      assert.equal(process.env.PI_TOUCHTONE_METADATA, raw);
+      assert.deepEqual(child.notifications, []);
+      assert.equal(globals[launchSlot], undefined);
+      await child.event("session_start");
+      const store = new TouchtoneStore({ root });
+      assert.deepEqual(store.liveSessions()[0].launch, {
+        agent: "agent",
+        runId: "run",
+      });
+      assert.equal(process.env.PI_TOUCHTONE_METADATA, undefined);
+      assert.equal(child.notifications.length, 1);
+      assert.equal(child.notifications[0].severity, "warning");
+      assert.match(child.notifications[0].message, /PI_TOUCHTONE_METADATA/);
+      await child.event("session_start");
+      assert.equal(child.notifications.length, 1);
+      await child.event("session_shutdown");
+      const fresh = await import(
+        `${pathToFileURL(path.resolve("extension.ts")).href}?warning-reload=${encodeURIComponent(raw)}`
+      );
+      reloaded = harness(
+        "child",
+        "Reloaded",
+        root,
+        process.pid,
+        fresh.createTouchtoneExtension,
+      );
+      await reloaded.event("session_start");
+      assert.deepEqual(reloaded.notifications, []);
+      assert.deepEqual(store.liveSessions()[0].launch, {
+        agent: "agent",
+        runId: "run",
+      });
+    } finally {
+      await child.event("session_shutdown");
+      await reloaded?.event("session_shutdown");
+    }
+  });
+}

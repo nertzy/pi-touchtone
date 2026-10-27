@@ -103,6 +103,14 @@ function readLaunchMetadata(env: NodeJS.ProcessEnv): {
   return { launch: Object.fromEntries(entries), parentSessionId, warning };
 }
 
+const LAUNCH_SLOT = Symbol.for("pi-touchtone.launch.v1");
+type LaunchSnapshot = ReturnType<typeof readLaunchMetadata> & {
+  warningShown: boolean;
+};
+const processGlobals = globalThis as typeof globalThis & {
+  [LAUNCH_SLOT]?: LaunchSnapshot;
+};
+
 export function launchMetadata(env: NodeJS.ProcessEnv, ownSessionId: string) {
   const metadata = readLaunchMetadata(env);
   return {
@@ -1031,6 +1039,11 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         pid,
         cwd: context.cwd,
         handles: Object.keys(handles).length ? handles : undefined,
+        launch: { ...processGlobals[LAUNCH_SLOT]?.launch },
+        parentSessionId:
+          processGlobals[LAUNCH_SLOT]?.parentSessionId === sessionId
+            ? undefined
+            : processGlobals[LAUNCH_SLOT]?.parentSessionId,
         updatedAt: new Date().toISOString(),
       };
     };
@@ -1595,9 +1608,24 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     });
 
     pi.on("session_start", async (_event, ctx) => {
+      const nextSessionId = requireSessionId(ctx.sessionManager.getSessionId());
       stop();
+      if (sessionId && sessionId !== nextSessionId)
+        store.unregister(sessionId, pid);
       context = ctx;
-      sessionId = requireSessionId(ctx.sessionManager.getSessionId());
+      sessionId = nextSessionId;
+      if (!processGlobals[LAUNCH_SLOT]) {
+        processGlobals[LAUNCH_SLOT] = {
+          ...readLaunchMetadata(process.env),
+          warningShown: false,
+        };
+        delete process.env.PI_TOUCHTONE_METADATA;
+      }
+      const snapshot = processGlobals[LAUNCH_SLOT];
+      if (snapshot.warning && !snapshot.warningShown) {
+        ctx.ui.notify(snapshot.warning, "warning");
+        snapshot.warningShown = true;
+      }
       // Re-arm the on-deck widget across /reload: snapshot the persisted ids
       // before clearing in-memory state, then restore them only when pi
       // still holds the queued custom messages (the pi#8349 abort
