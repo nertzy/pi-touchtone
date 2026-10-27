@@ -36,10 +36,30 @@ const CORE_FIELD_NAMES = new Set([
   "sessionName",
   "pid",
   "cwd",
-  "cmuxWorkspace",
-  "cmuxSurface",
-  "cmuxPanel",
+  "handles",
+  "launch",
+  "parentSessionId",
 ]);
+
+// Additional terminal variables verified against official documentation:
+// TMUX_PANE: https://man.openbsd.org/tmux.1
+// ZELLIJ_SESSION_NAME: https://zellij.dev/documentation/integration.html
+// ZELLIJ_PANE_ID: https://zellij.dev/documentation/cli-recipes.html
+// WEZTERM_PANE: https://wezterm.org/cli/cli/index.html
+// KITTY_WINDOW_ID: https://sw.kovidgoyal.net/kitty/remote-control/
+const TERMINAL_HANDLES = [
+  ["CMUX_WORKSPACE_ID", "cmux.workspace"],
+  ["CMUX_SURFACE_ID", "cmux.surface"],
+  ["CMUX_PANEL_ID", "cmux.panel"],
+  ["HERDR_WORKSPACE_ID", "herdr.workspace"],
+  ["HERDR_TAB_ID", "herdr.tab"],
+  ["HERDR_PANE_ID", "herdr.pane"],
+  ["TMUX_PANE", "tmux.pane"],
+  ["ZELLIJ_SESSION_NAME", "zellij.session"],
+  ["ZELLIJ_PANE_ID", "zellij.pane"],
+  ["WEZTERM_PANE", "wezterm.pane"],
+  ["KITTY_WINDOW_ID", "kitty.window"],
+] as const;
 
 function isAbsolutePath(value: string | undefined): value is string {
   return typeof value === "string" && path.isAbsolute(value);
@@ -68,9 +88,9 @@ export interface TouchtoneSession {
   sessionName?: string;
   pid: number;
   cwd: string;
-  cmuxWorkspace?: string;
-  cmuxSurface?: string;
-  cmuxPanel?: string;
+  handles?: Record<string, string>;
+  launch?: Record<string, string>;
+  parentSessionId?: string;
   updatedAt: string;
 }
 
@@ -327,12 +347,34 @@ function readBoundedSidecar(file: string): string | undefined {
 function isSession(value: unknown): value is TouchtoneSession {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<TouchtoneSession>;
-  return (
-    typeof record.sessionId === "string" &&
-    SESSION_ID_RE.test(record.sessionId) &&
-    typeof record.pid === "number" &&
-    typeof record.cwd === "string"
-  );
+  if (
+    !(
+      typeof record.sessionId === "string" &&
+      SESSION_ID_RE.test(record.sessionId) &&
+      typeof record.pid === "number" &&
+      typeof record.cwd === "string"
+    )
+  )
+    return false;
+  for (const field of ["handles", "launch"] as const) {
+    const map = record[field];
+    if (
+      !map ||
+      typeof map !== "object" ||
+      Array.isArray(map) ||
+      !Object.values(map).every(
+        (value) => typeof value === "string" && value.trim().length > 0,
+      )
+    ) {
+      delete record[field];
+    }
+  }
+  if (
+    typeof record.parentSessionId !== "string" ||
+    !record.parentSessionId.trim()
+  )
+    delete record.parentSessionId;
+  return true;
 }
 
 function isMessage(value: unknown): value is TouchtoneMessage {
@@ -387,9 +429,8 @@ export function sessionSelectors(
       : undefined,
     String(session.pid),
     session.cwd,
-    session.cmuxWorkspace,
-    session.cmuxSurface,
-    session.cmuxPanel,
+    ...Object.values(session.handles ?? {}),
+    ...Object.values(session.launch ?? {}),
   ].filter(
     (value): value is string => typeof value === "string" && value.length > 0,
   );
@@ -740,7 +781,7 @@ interface TouchtoneDetails {
 
 function rosterHandles(session: TouchtoneSession): string {
   return (
-    [session.cmuxWorkspace, session.cmuxSurface, session.cmuxPanel]
+    TERMINAL_HANDLES.map(([, key]) => session.handles?.[key])
       .filter(Boolean)
       .join(" ") || "—"
   );
@@ -926,14 +967,17 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
     const self = (): TouchtoneSession => {
       if (!context || !sessionId)
         throw new Error("Touchtone is not initialized.");
+      const handles: Record<string, string> = {};
+      for (const [variable, key] of TERMINAL_HANDLES) {
+        const value = process.env[variable]?.trim();
+        if (value) handles[key] = value;
+      }
       return {
         sessionId,
         sessionName: pi.getSessionName() ?? undefined,
         pid,
         cwd: context.cwd,
-        cmuxWorkspace: process.env.CMUX_WORKSPACE_ID?.trim() || undefined,
-        cmuxSurface: process.env.CMUX_SURFACE_ID?.trim() || undefined,
-        cmuxPanel: process.env.CMUX_PANEL_ID?.trim() || undefined,
+        handles: Object.keys(handles).length ? handles : undefined,
         updatedAt: new Date().toISOString(),
       };
     };

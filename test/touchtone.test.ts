@@ -4,7 +4,7 @@ import fsDefault, * as fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -28,6 +28,39 @@ import {
 } from "../extension.ts";
 
 const roots: string[] = [];
+const handleVariables = [
+  ["CMUX_WORKSPACE_ID", "cmux.workspace"],
+  ["CMUX_SURFACE_ID", "cmux.surface"],
+  ["CMUX_PANEL_ID", "cmux.panel"],
+  ["HERDR_WORKSPACE_ID", "herdr.workspace"],
+  ["HERDR_TAB_ID", "herdr.tab"],
+  ["HERDR_PANE_ID", "herdr.pane"],
+  ["TMUX_PANE", "tmux.pane"],
+  ["ZELLIJ_SESSION_NAME", "zellij.session"],
+  ["ZELLIJ_PANE_ID", "zellij.pane"],
+  ["WEZTERM_PANE", "wezterm.pane"],
+  ["KITTY_WINDOW_ID", "kitty.window"],
+] as const;
+const environmentVariables = [
+  ...handleVariables.map(([variable]) => variable),
+  "PI_TOUCHTONE_METADATA",
+  "PI_SUBAGENT_CHILD",
+  "PI_SUBAGENT_CHILD_AGENT",
+  "PI_SUBAGENT_RUN_ID",
+  "PI_SUBAGENT_PARENT_SESSION_ID",
+  "PI_SUBAGENT_CHILD_INDEX",
+];
+// Keep top-level tests serial: registration mutates process-global state.
+const launchSlot = Symbol.for("pi-touchtone.launch.v1");
+const globals = globalThis as unknown as Record<symbol, unknown>;
+let savedEnvironment: Array<[string, string | undefined]>;
+let savedSlot: PropertyDescriptor | undefined;
+beforeEach(() => {
+  savedEnvironment = environmentVariables.map((key) => [key, process.env[key]]);
+  for (const key of environmentVariables) delete process.env[key];
+  savedSlot = Object.getOwnPropertyDescriptor(globalThis, launchSlot);
+  delete globals[launchSlot];
+});
 
 // Terminal escape sequences require the ESC control character, which Biome's
 // noControlCharactersInRegex flags inside regex literals. Building the pattern
@@ -36,6 +69,12 @@ const ESC = "\x1b";
 const ansi = (pattern: string): RegExp => new RegExp(`${ESC}${pattern}`);
 
 afterEach(() => {
+  for (const [key, value] of savedEnvironment) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  delete globals[launchSlot];
+  if (savedSlot) Object.defineProperty(globalThis, launchSlot, savedSlot);
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true });
 });
@@ -89,6 +128,11 @@ test("phonebook ignores sidecar keys that collide with core fields", () => {
   store.writeMetadata("alice", "evil", {
     sessionId: "mallory",
     pid: ["1"],
+    sessionName: "forged-name",
+    cwd: "forged-cwd",
+    handles: "forged-handles",
+    launch: "forged-launch",
+    parentSessionId: "forged-parent",
     updatedAt: "addressable-timestamp",
   });
   const [entry] = store.phonebook();
@@ -138,24 +182,135 @@ test("removeMetadata removes one publisher contribution", () => {
   assert.ok(after.selectors.includes("/tmp/alice"));
 });
 
-test("phonebook includes each optional cmux selector exactly once", () => {
+test("phonebook orders core, handle, launch, and sidecar selectors without dialing parent", () => {
   const store = new TouchtoneStore({ root: temporaryRoot() });
   store.initialize("alice");
   store.register(
     rosterSession("alice", {
-      cmuxWorkspace: "workspace-1",
-      cmuxSurface: "surface-1",
-      cmuxPanel: "panel-1",
+      handles: {
+        "cmux.workspace": "workspace-1",
+        "cmux.surface": "surface-1",
+        "cmux.panel": "panel-1",
+      },
+      launch: { agent: "worker", runId: "run-1", duplicate: "surface-1" },
+      parentSessionId: "parent-only",
     }),
   );
 
+  store.writeMetadata("alice", "ticket", {
+    ticket: ["surface-1", "run-1", "E-123"],
+  });
   const [entry] = store.phonebook();
-  for (const selector of ["workspace-1", "surface-1", "panel-1"]) {
-    assert.equal(
-      entry.selectors.filter((value) => value === selector).length,
-      1,
+  assert.deepEqual(entry.selectors, [
+    "alice",
+    String(process.pid),
+    "/tmp/alice",
+    "workspace-1",
+    "surface-1",
+    "panel-1",
+    "worker",
+    "run-1",
+    "E-123",
+  ]);
+});
+
+for (const [variable, key] of handleVariables) {
+  test(`registration publishes trimmed ${variable}`, async (t) => {
+    const root = temporaryRoot();
+    process.env[variable] = "  pane-value  ";
+    const child = harness("child", "Child", root);
+    t.after(() => child.event("session_shutdown"));
+    await child.event("session_start");
+    assert.deepEqual(
+      new TouchtoneStore({ root }).phonebook()[0].session.handles,
+      { [key]: "pane-value" },
     );
+  });
+}
+
+test("registration omits blank handles", async (t) => {
+  const root = temporaryRoot();
+  for (const [variable] of handleVariables) process.env[variable] = " \t ";
+  const child = harness("child", "Child", root);
+  t.after(() => child.event("session_shutdown"));
+  await child.event("session_start");
+  assert.equal(
+    new TouchtoneStore({ root }).phonebook()[0].session.handles,
+    undefined,
+  );
+});
+
+test("registration publishes cmux and herdr together in table order", async (t) => {
+  const root = temporaryRoot();
+  const expected = Object.fromEntries(
+    handleVariables.slice(0, 6).map(([variable, key], index) => {
+      process.env[variable] = ` handle-${index} `;
+      return [key, `handle-${index}`];
+    }),
+  );
+  const child = harness("child", "Child", root);
+  t.after(() => child.event("session_shutdown"));
+  await child.event("session_start");
+  const [entry] = new TouchtoneStore({ root }).phonebook();
+  assert.deepEqual(entry.session.handles, expected);
+  assert.deepEqual(entry.selectors, [
+    "child",
+    "Child",
+    String(process.pid),
+    path.join(os.tmpdir(), "Child"),
+    ...Object.values(expected),
+  ]);
+});
+
+for (const field of ["handles", "launch", "parentSessionId"]) {
+  const invalid =
+    field === "parentSessionId"
+      ? [null, [], {}, 1, " "]
+      : [null, [], { bad: {} }, { good: "retained", bad: 1 }, { bad: " " }];
+  for (const value of invalid) {
+    test(`phonebook drops malformed ${field}: ${JSON.stringify(value)}`, () => {
+      const root = temporaryRoot();
+      const store = new TouchtoneStore({ root });
+      store.initialize("alice");
+      const valid = {
+        handles: { "kitty.window": " 1 " },
+        launch: { agent: " worker " },
+        parentSessionId: " parent ",
+      };
+      fs.writeFileSync(
+        path.join(store.paths.sessions, "alice.json"),
+        JSON.stringify({ ...rosterSession("alice"), ...valid, [field]: value }),
+      );
+      const [entry] = store.phonebook();
+      const expected: Record<string, unknown> = { ...valid };
+      delete expected[field];
+      assert.deepEqual(entry.session, {
+        ...rosterSession("alice"),
+        ...expected,
+      });
+    });
   }
+}
+
+test("legacy cmux fields are not handles or selectors", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  store.initialize("alice");
+  fs.writeFileSync(
+    path.join(store.paths.sessions, "alice.json"),
+    JSON.stringify({
+      ...rosterSession("alice"),
+      cmuxWorkspace: "old-w",
+      cmuxSurface: "old-s",
+      cmuxPanel: "old-p",
+    }),
+  );
+  const [entry] = store.phonebook();
+  assert.equal(entry.session.handles, undefined);
+  assert.deepEqual(entry.selectors, [
+    "alice",
+    String(process.pid),
+    "/tmp/alice",
+  ]);
 });
 
 test("phonebook ignores sidecars for unknown sessions", () => {
@@ -244,9 +399,13 @@ test("broadcast matches every phonebook value, dedupes, and excludes self", () =
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   store.initialize("alice");
-  store.register(rosterSession("alice", { cmuxWorkspace: "ws-1" }));
+  store.register(
+    rosterSession("alice", { handles: { "cmux.workspace": "ws-1" } }),
+  );
   store.initialize("bob");
-  store.register(rosterSession("bob", { cmuxWorkspace: "ws-1" }));
+  store.register(
+    rosterSession("bob", { handles: { "cmux.workspace": "ws-1" } }),
+  );
 
   const outcome = store.broadcast(
     rosterSession("alice"),
@@ -781,15 +940,7 @@ test("registers the tool, lists live sessions, and wakes an idle recipient", asy
 
   const list = await alice.tool({ action: "list" });
   const expectedSelectors = (id: string, name: string) =>
-    [
-      id,
-      name,
-      String(process.pid),
-      path.join(os.tmpdir(), name),
-      process.env.CMUX_WORKSPACE_ID,
-      process.env.CMUX_SURFACE_ID,
-      process.env.CMUX_PANEL_ID,
-    ].filter(
+    [id, name, String(process.pid), path.join(os.tmpdir(), name)].filter(
       (value, index, values): value is string =>
         Boolean(value) && values.indexOf(value) === index,
     );
@@ -1317,9 +1468,14 @@ test("renders a compact roster summary and an expanded width-aware table", async
       sessionName: "Bob",
       pid: 12345,
       cwd: "/界/path",
-      cmuxWorkspace: "workspace-1",
-      cmuxSurface: "surface-2",
-      cmuxPanel: "panel-3",
+      handles: {
+        "cmux.workspace": "workspace-1",
+        "cmux.surface": "surface-2",
+        "cmux.panel": "panel-3",
+        "herdr.workspace": "wE",
+        "herdr.tab": "wE:t2",
+        "herdr.pane": "wE:p2",
+      },
       updatedAt: new Date().toISOString(),
     },
   ];
@@ -1452,8 +1608,10 @@ test("renders a compact roster summary and an expanded width-aware table", async
   assert.match(plainExpanded.join("\n"), /Bob/);
   assert.match(plainExpanded.join("\n"), /12345/);
   assert.match(plainExpanded.join("\n"), /\/界\/path/);
-  assert.match(plainExpanded.join("\n"), /workspace-1 surface-2/);
-  assert.match(plainExpanded.join("\n"), /panel-3/);
+  assert.match(
+    plainExpanded.join("\n"),
+    /workspace-1 surface-2 panel-3 wE wE:t2 wE:p2/,
+  );
   assert.ok(expanded.every((line) => visibleWidth(line) <= 160));
 
   const compact = alice.renderToolResult(result, { action: "list" });
