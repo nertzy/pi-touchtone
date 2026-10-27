@@ -313,27 +313,25 @@ test("phonebook orders core, handle, launch, and sidecar selectors without diali
   store.initialize("alice");
   store.register(
     rosterSession("alice", {
-      handles: {
-        "cmux.workspace": "workspace-1",
-        "cmux.surface": "surface-1",
-        "cmux.panel": "panel-1",
-      },
-      launch: { agent: "worker", runId: "run-1", duplicate: "surface-1" },
+      sessionName: "Alice",
+      handles: Object.fromEntries(
+        handleVariables.map(([, key], index) => [key, `handle-${index}`]),
+      ),
+      launch: { agent: "worker", runId: "run-1", duplicate: "handle-1" },
       parentSessionId: "parent-only",
     }),
   );
 
   store.writeMetadata("alice", "ticket", {
-    ticket: ["surface-1", "run-1", "E-123"],
+    ticket: ["handle-1", "run-1", "E-123"],
   });
   const [entry] = store.phonebook();
   assert.deepEqual(entry.selectors, [
     "alice",
+    "Alice",
     String(process.pid),
     "/tmp/alice",
-    "workspace-1",
-    "surface-1",
-    "panel-1",
+    ...handleVariables.map((_, index) => `handle-${index}`),
     "worker",
     "run-1",
     "E-123",
@@ -1173,7 +1171,7 @@ test("tool description documents broadcast selectors and untrusted content", () 
   const description = alice.toolDescription();
   assert.match(
     description,
-    /send a message to a group of sessions at once; each selector matches every session whose phonebook values contain it — session id, name, cwd, pid, cmux handles, or contributed metadata such as a ticket id/,
+    /send a message to a group of sessions at once; each selector matches every session whose phonebook values contain it — session id, name, cwd, pid, terminal handles, or contributed metadata such as a ticket id/,
   );
   assert.match(
     description,
@@ -1183,7 +1181,7 @@ test("tool description documents broadcast selectors and untrusted content", () 
   // shared-locator contract, not the old send-only/broadcast-only one.
   for (const name of ["to", "selectors"]) {
     const property = alice.toolParameterDescription(name);
-    assert.match(property, /session id, name, cwd, pid, cmux handle/);
+    assert.match(property, /session id, name, cwd, pid, terminal handle/);
     assert.match(property, /list filters/);
     assert.doesNotMatch(property, /send only|broadcast only/);
   }
@@ -1602,6 +1600,268 @@ test("list output shows copyable selectors as JSON per session", async (t) => {
   assert.equal(details.broadcast.delivered, 1);
 });
 
+test("list snapshots parent annotations from the full roster without regrouping", async (t) => {
+  const root = temporaryRoot();
+  const caller = harness("caller", "Caller", root);
+  t.after(() => caller.event("session_shutdown"));
+  await caller.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.register(rosterSession("parent-a", { sessionName: "Parent" }));
+  store.register(
+    rosterSession("child-a", {
+      sessionName: "Child",
+      parentSessionId: "parent-a",
+    }),
+  );
+  store.register(rosterSession("child-b", { parentSessionId: "unnamed" }));
+  store.register(rosterSession("unnamed", { sessionName: "" }));
+  store.register(rosterSession("child-c", { parentSessionId: "gone" }));
+  const full = await caller.tool({ action: "list" });
+  const details = full.details as {
+    sessions: TouchtoneSession[];
+    parentAnnotations: Record<string, string>;
+  };
+  assert.deepEqual(
+    details.sessions.map((s) => s.sessionId),
+    store.phonebook().map((e) => e.session.sessionId),
+  );
+  assert.deepEqual(
+    { ...details.parentAnnotations },
+    {
+      "child-a": "spawned by Parent (parent-a)",
+      "child-b": "spawned by unnamed",
+      "child-c": "spawned by gone (not live)",
+    },
+  );
+  for (const [id, annotation] of Object.entries(details.parentAnnotations)) {
+    const line = full.content[0].text
+      .split("\n")
+      .find((line) => line.startsWith(`- ${id} - `));
+    assert.ok(line?.includes(` - ${annotation} - pid `));
+    const table = caller
+      .renderToolResult(full, { action: "list" }, true)
+      .render(160);
+    assert.ok(table.includes(annotation));
+  }
+  const filtered = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(
+    filtered.content[0].text,
+    /Child - spawned by Parent \(parent-a\) - pid/,
+  );
+  const before = JSON.stringify(filtered);
+  const rendered = caller
+    .renderToolResult(filtered, { action: "list" }, true)
+    .render(160);
+  store.register(rosterSession("parent-a", { sessionName: "Renamed" }));
+  assert.deepEqual(
+    caller.renderToolResult(filtered, { action: "list" }, true).render(160),
+    rendered,
+  );
+  store.register(rosterSession("parent-a", { sessionName: "" }));
+  const unnamedParent = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(
+    unnamedParent.content[0].text,
+    /Child - spawned by parent-a - pid/,
+  );
+  assert.ok(
+    caller
+      .renderToolResult(unnamedParent, { action: "list" }, true)
+      .render(160)
+      .includes("spawned by parent-a"),
+  );
+  store.unregister("parent-a", process.pid);
+  store.register(rosterSession("parent-new", { sessionName: "Parent" }));
+  assert.equal(JSON.stringify(filtered), before);
+  assert.deepEqual(
+    caller.renderToolResult(filtered, { action: "list" }, true).render(160),
+    rendered,
+  );
+  const fresh = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(fresh.content[0].text, /spawned by parent-a \(not live\)/);
+  assert.ok(
+    caller
+      .renderToolResult(fresh, { action: "list" }, true)
+      .render(160)
+      .includes("spawned by parent-a (not live)"),
+  );
+});
+
+for (const [, key] of handleVariables) {
+  test(`raw ${key} supports unique send, list, and broadcast`, async (t) => {
+    const root = temporaryRoot();
+    const caller = harness("caller", "Caller", root);
+    t.after(() => caller.event("session_shutdown"));
+    await caller.event("session_start");
+    const store = new TouchtoneStore({ root });
+    store.register(rosterSession("child", { handles: { [key]: "1" } }));
+    const listed = await caller.tool({ action: "list", to: "1" });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions.map(
+        (s) => s.sessionId,
+      ),
+      ["child"],
+    );
+    const sent = await caller.tool({
+      action: "send",
+      to: "1",
+      message: "hello",
+    });
+    assert.equal(
+      (sent.details as { recipient: TouchtoneSession }).recipient.sessionId,
+      "child",
+    );
+    const broadcast = await caller.tool({
+      action: "broadcast",
+      to: "1",
+      message: "hello",
+    });
+    assert.deepEqual(
+      (
+        broadcast.details as { broadcast: { recipients: TouchtoneSession[] } }
+      ).broadcast.recipients.map((s) => s.sessionId),
+      ["child"],
+    );
+  });
+}
+
+test("launch selectors dial children without dialing their parent; collisions stay ambiguous", async (t) => {
+  const root = temporaryRoot();
+  const caller = harness("caller", "Caller", root);
+  t.after(() => caller.event("session_shutdown"));
+  await caller.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.register(
+    rosterSession("parent-a", {
+      sessionName: "Parent",
+      handles: { "kitty.window": "shared" },
+    }),
+  );
+  for (const id of ["a", "b"]) {
+    const normalized = launchMetadata(
+      {
+        PI_SUBAGENT_CHILD: "1",
+        PI_SUBAGENT_CHILD_AGENT: ` worker-${id} `,
+        PI_SUBAGENT_RUN_ID: " run ",
+      },
+      id,
+    );
+    store.register(
+      rosterSession(id, {
+        launch: {
+          ...normalized.launch,
+          ticket: `ticket-${id}`,
+          collision: "Parent",
+        },
+        handles: { "kitty.window": "shared" },
+        ...(id === "a" ? { parentSessionId: "parent-a" } : {}),
+      }),
+    );
+  }
+  for (const [locator, id] of [
+    ["worker-a", "a"],
+    ["ticket-a", "a"],
+    ["parent-a", "parent-a"],
+  ]) {
+    const sent = await caller.tool({
+      action: "send",
+      to: locator,
+      message: "hello",
+    });
+    assert.equal(
+      (sent.details as { recipient: TouchtoneSession }).recipient.sessionId,
+      id,
+    );
+    const listed = await caller.tool({ action: "list", to: locator });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions.map(
+        (s) => s.sessionId,
+      ),
+      [id],
+    );
+  }
+  for (const [locator, ids] of [
+    ["run", ["a", "b"]],
+    ["shared", ["a", "b", "parent-a"]],
+  ] as const) {
+    const listed = await caller.tool({ action: "list", to: locator });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions
+        .map((s) => s.sessionId)
+        .sort(),
+      [...ids],
+    );
+    const sent = await caller.tool({
+      action: "broadcast",
+      to: locator,
+      message: "hello",
+    });
+    assert.deepEqual(
+      (
+        sent.details as { broadcast: { recipients: TouchtoneSession[] } }
+      ).broadcast.recipients
+        .map((s) => s.sessionId)
+        .sort(),
+      [...ids],
+    );
+  }
+  const collisionChild = store
+    .phonebook()
+    .find((entry) => entry.session.sessionId === "a")?.session;
+  assert.ok(collisionChild);
+  store.register({
+    ...collisionChild,
+    launch: { ...collisionChild.launch, idCollision: "parent-a" },
+  });
+  await assert.rejects(
+    caller.tool({ action: "send", to: "parent-a", message: "hello" }),
+    /delivers to exactly one session/,
+  );
+  // A launch value colliding with an ID or name retains the same ambiguity.
+  for (const locator of ["shared", "run", "Parent"]) {
+    await assert.rejects(
+      caller.tool({ action: "send", to: locator, message: "hello" }),
+      /delivers to exactly one session/,
+    );
+  }
+  const noParent = await caller.tool({ action: "list", to: "worker-b" });
+  assert.doesNotMatch(noParent.content[0].text, /spawned by/);
+  assert.deepEqual(
+    (noParent.details as { sessions: TouchtoneSession[] }).sessions.map(
+      (s) => s.sessionId,
+    ),
+    ["b"],
+  );
+  store.unregister("b", process.pid);
+  const uniqueRun = await caller.tool({
+    action: "send",
+    to: "run",
+    message: "hello",
+  });
+  assert.equal(
+    (uniqueRun.details as { recipient: TouchtoneSession }).recipient.sessionId,
+    "a",
+  );
+  const child = await caller.tool({ action: "list", to: "worker-a" });
+  assert.match(child.content[0].text, /spawned by Parent/);
+});
+
+test("missing locators describe terminal handles and end with working examples", async () => {
+  const caller = harness("caller", "Caller", temporaryRoot());
+  for (const action of ["send", "broadcast"] as const) {
+    await assert.rejects(
+      caller.tool({ action, message: "hello" }),
+      (error: Error) => {
+        assert.match(error.message, /terminal handle/);
+        assert.match(
+          error.message,
+          /Example of a successful touchtone call:\n\{[^\n]+\}$/,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test("renders a compact roster summary and an expanded width-aware table", async () => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
@@ -1624,7 +1884,13 @@ test("renders a compact roster summary and an expanded width-aware table", async
   ];
   const result = {
     content: [{ type: "text", text: "model-facing roster remains unchanged" }],
-    details: { sessions },
+    details: {
+      sessions,
+      parentAnnotations: {
+        [sessions[0].sessionId]:
+          `spawned by ${"界Parent".repeat(30)} (${"parent-id".repeat(30)})`,
+      },
+    },
   };
 
   assert.deepEqual(alice.renderToolCall({ action: "list" }).render(80), []);
@@ -1756,6 +2022,19 @@ test("renders a compact roster summary and an expanded width-aware table", async
     /workspace-1 surface-2 panel-3 wE wE:t2 wE:p2/,
   );
   assert.ok(expanded.every((line) => visibleWidth(line) <= 160));
+  const annotationStart = plainExpanded.findIndex((line) =>
+    line.startsWith("spawned by "),
+  );
+  assert.ok(annotationStart > 3);
+  assert.ok(visibleWidth(plainExpanded[annotationStart]) > 16);
+  const historical = { ...result, details: { sessions } };
+  assert.doesNotMatch(
+    alice
+      .renderToolResult(historical, { action: "list" }, true)
+      .render(160)
+      .join("\n"),
+    /spawned by/,
+  );
 
   const compact = alice.renderToolResult(result, { action: "list" });
   for (const width of [1, 5, 10]) {
@@ -1782,7 +2061,7 @@ test("renders a compact roster summary and an expanded width-aware table", async
     expandedRoster.render(60).join("\n"),
     /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/,
   );
-  for (let width = 1; width <= 80; width += 1) {
+  for (let width = 1; width <= 160; width += 1) {
     const lines = expandedRoster.render(width);
     assert.ok(
       lines.every((line) => visibleWidth(line) <= width),
