@@ -61,6 +61,59 @@ const TERMINAL_HANDLES = [
   ["KITTY_WINDOW_ID", "kitty.window"],
 ] as const;
 
+function readLaunchMetadata(env: NodeJS.ProcessEnv): {
+  launch: Record<string, string>;
+  parentSessionId: string | undefined;
+  warning: string | undefined;
+} {
+  const entries: [string, string][] = [];
+  let parentSessionId: string | undefined;
+  let warning: string | undefined;
+  if (env.PI_SUBAGENT_CHILD === "1") {
+    const agent = env.PI_SUBAGENT_CHILD_AGENT?.trim();
+    const runId = env.PI_SUBAGENT_RUN_ID?.trim();
+    parentSessionId = env.PI_SUBAGENT_PARENT_SESSION_ID?.trim() || undefined;
+    if (agent) entries.push(["agent", agent]);
+    if (runId) entries.push(["runId", runId]);
+  }
+  const raw = env.PI_TOUCHTONE_METADATA;
+  if (raw !== undefined) {
+    try {
+      if (Buffer.byteLength(raw, "utf8") > MAX_SIDECAR_BYTES) {
+        throw new Error("oversized metadata");
+      }
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        throw new Error("metadata must be an object");
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== "string" || !value.trim()) continue;
+        if (key === "parentSessionId") parentSessionId = value.trim();
+        else entries.push([key, value.trim()]);
+      }
+    } catch {
+      warning =
+        "Ignoring invalid PI_TOUCHTONE_METADATA: expected a JSON object of at most 64 KB.";
+    }
+  }
+  return { launch: Object.fromEntries(entries), parentSessionId, warning };
+}
+
+export function launchMetadata(env: NodeJS.ProcessEnv, ownSessionId: string) {
+  const metadata = readLaunchMetadata(env);
+  return {
+    ...metadata,
+    parentSessionId:
+      metadata.parentSessionId === ownSessionId
+        ? undefined
+        : metadata.parentSessionId,
+  };
+}
+
 function isAbsolutePath(value: string | undefined): value is string {
   return typeof value === "string" && path.isAbsolute(value);
 }

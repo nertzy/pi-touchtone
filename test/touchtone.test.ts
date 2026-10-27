@@ -20,12 +20,138 @@ import {
 } from "../chat-bubble.ts";
 import {
   createTouchtoneExtension,
+  launchMetadata,
   ON_DECK_EVENT,
   resolveStoreRoot,
   type TouchtoneMessage,
   type TouchtoneSession,
   TouchtoneStore,
 } from "../extension.ts";
+
+const cohortEnv = {
+  PI_SUBAGENT_CHILD: "1",
+  PI_SUBAGENT_CHILD_AGENT: " agent ",
+  PI_SUBAGENT_RUN_ID: " run ",
+  PI_SUBAGENT_PARENT_SESSION_ID: " parent ",
+  PI_SUBAGENT_CHILD_INDEX: "3",
+};
+
+for (const { name, env, launch, parentSessionId } of [
+  { name: "no input", env: {}, launch: {}, parentSessionId: undefined },
+  ...[undefined, "0", "1"].map((gate) => ({
+    name: `cohort gate ${gate}`,
+    env: { ...cohortEnv, PI_SUBAGENT_CHILD: gate },
+    launch: gate === "1" ? { agent: "agent", runId: "run" } : {},
+    parentSessionId: gate === "1" ? "parent" : undefined,
+  })),
+  {
+    name: "generic alone",
+    env: {
+      PI_TOUCHTONE_METADATA:
+        '{"agent":" generic ","parentSessionId":" parent "}',
+    },
+    launch: { agent: "generic" },
+    parentSessionId: "parent",
+  },
+  {
+    name: "generic overrides retained keys",
+    env: {
+      ...cohortEnv,
+      PI_TOUCHTONE_METADATA:
+        '{"agent":"other","ticket":" GH-31 ","parentSessionId":"other-parent"}',
+    },
+    launch: { agent: "other", runId: "run", ticket: "GH-31" },
+    parentSessionId: "other-parent",
+  },
+  {
+    name: "dropped generic values preserve fallback",
+    env: {
+      ...cohortEnv,
+      PI_TOUCHTONE_METADATA:
+        '{"agent":" ","runId":7,"parentSessionId":null,"array":[],"object":{},"flag":false,"ticket":" ok "}',
+    },
+    launch: { agent: "agent", runId: "run", ticket: "ok" },
+    parentSessionId: "parent",
+  },
+  {
+    name: "self parent removed",
+    env: { ...cohortEnv, PI_TOUCHTONE_METADATA: '{"parentSessionId":" own "}' },
+    launch: { agent: "agent", runId: "run" },
+    parentSessionId: undefined,
+  },
+]) {
+  test(`launchMetadata normalizes ${name} without side effects`, () => {
+    const before = { ...env };
+    assert.deepEqual(launchMetadata(Object.freeze(env), "own"), {
+      launch,
+      parentSessionId,
+      warning: undefined,
+    });
+    assert.deepEqual(env, before);
+    assert.equal(globals[launchSlot], undefined);
+  });
+}
+
+const byteLimit = 65_536;
+const exactMetadata = JSON.stringify({ ticket: "x".repeat(byteLimit - 13) });
+for (const [name, raw] of [
+  ["empty", ""],
+  ["invalid JSON", "{\nsecret"],
+  ["null", "null"],
+  ["array", "[]"],
+  ["string", '"text"'],
+  ["number", "1"],
+  ["boolean", "true"],
+  ["one byte overflow", `${exactMetadata} `],
+  ["multibyte overflow", JSON.stringify({ ticket: "é".repeat(32_762) })],
+]) {
+  test(`launchMetadata rejects ${name} and preserves cohort values`, () => {
+    const env = Object.freeze({ ...cohortEnv, PI_TOUCHTONE_METADATA: raw });
+    const before = { ...env };
+    const result = launchMetadata(env, "own");
+    assert.equal(typeof result.warning, "string");
+    assert.ok(result.warning);
+    assert.doesNotMatch(result.warning, /[\r\n]/);
+    assert.ok(!result.warning.includes(raw) || raw === "");
+    assert.deepEqual(result, {
+      launch: { agent: "agent", runId: "run" },
+      parentSessionId: "parent",
+      warning: result.warning,
+    });
+    assert.deepEqual(env, before);
+  });
+}
+
+test("launchMetadata accepts exactly 65536 UTF-8 bytes and safe arbitrary keys", () => {
+  assert.equal(Buffer.byteLength(exactMetadata, "utf8"), byteLimit);
+  assert.equal(Buffer.byteLength(`${exactMetadata} `, "utf8"), byteLimit + 1);
+  const multibyte = JSON.stringify({ ticket: "é".repeat(32_762) });
+  assert.ok(multibyte.length < byteLimit);
+  assert.ok(Buffer.byteLength(multibyte, "utf8") > byteLimit);
+  assert.deepEqual(
+    launchMetadata({ PI_TOUCHTONE_METADATA: exactMetadata }, "own"),
+    {
+      launch: { ticket: "x".repeat(byteLimit - 13) },
+      parentSessionId: undefined,
+      warning: undefined,
+    },
+  );
+  const result = launchMetadata(
+    { PI_TOUCHTONE_METADATA: '{"__proto__":" safe ","constructor":" value "}' },
+    "own",
+  );
+  assert.deepEqual(result, {
+    launch: JSON.parse('{"__proto__":"safe","constructor":"value"}'),
+    parentSessionId: undefined,
+    warning: undefined,
+  });
+  assert.equal(Object.getPrototypeOf(result.launch), Object.prototype);
+  assert.ok(
+    Object.values(result.launch).every(
+      (value) => typeof value === "string" && value.trim().length > 0,
+    ),
+  );
+});
 
 const roots: string[] = [];
 const handleVariables = [
