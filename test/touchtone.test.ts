@@ -3318,7 +3318,7 @@ for (const raw of ["{broken", "null"]) {
     let reloaded: ReturnType<typeof harness> | undefined;
     try {
       assert.equal(process.env.PI_TOUCHTONE_METADATA, raw);
-      assert.deepEqual(child.notifications, []);
+      assert.equal(child.notifications.length, 0);
       assert.equal(globals[launchSlot], undefined);
       await child.event("session_start");
       const store = new TouchtoneStore({ root });
