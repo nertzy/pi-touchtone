@@ -1,6 +1,6 @@
 {
   "name": "pi-touchtone",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local cross-session messaging for Pi agents",
   "type": "module",
   "license": "MIT",
