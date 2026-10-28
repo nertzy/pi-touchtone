@@ -4,6 +4,8 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
 ### Added
 
 - Added terminal handles for cmux, herdr, tmux, zellij, WezTerm, and kitty as
