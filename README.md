@@ -196,7 +196,7 @@ Touchtone also recognizes these pi-cohort launch inputs:
 | `PI_SUBAGENT_CHILD=1` | Enables reading the following `PI_SUBAGENT_*` values |
 | `PI_SUBAGENT_CHILD_AGENT` | Maps to `agent` |
 | `PI_SUBAGENT_RUN_ID` | Maps to `runId` |
-| `PI_SUBAGENT_PARENT_SESSION_ID` | Maps to non-dialable `parentSessionId`; **proposed**, not current pi-cohort support |
+| `PI_SUBAGENT_PARENT_SESSION_ID` | Maps to non-dialable `parentSessionId` (pi-cohort 7.6.3+) |
 
 Retained generic values override these gated inputs per key. A blank or
 non-string generic value does not erase a valid pi-cohort value. Invalid JSON,
