@@ -4,6 +4,15 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added terminal handles for cmux, herdr, tmux, zellij, WezTerm, and kitty as
+  exact-match phonebook locators, with mixed-terminal handles shown in `list`.
+- Added launcher metadata from `PI_TOUCHTONE_METADATA` and gated
+  `PI_SUBAGENT_*` inputs: agent, run, and other launch values are dialable,
+  while a non-dialable parent session ID provides spawned-by annotations.
+  Launch state survives reloads and session switches within the process.
+
 ## [0.3.0] - 2026-10-13
 
 ### Added

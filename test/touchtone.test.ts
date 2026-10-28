@@ -4,7 +4,7 @@ import fsDefault, * as fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -20,6 +20,7 @@ import {
 } from "../chat-bubble.ts";
 import {
   createTouchtoneExtension,
+  launchMetadata,
   ON_DECK_EVENT,
   resolveStoreRoot,
   type TouchtoneMessage,
@@ -27,7 +28,165 @@ import {
   TouchtoneStore,
 } from "../extension.ts";
 
+const cohortEnv = {
+  PI_SUBAGENT_CHILD: "1",
+  PI_SUBAGENT_CHILD_AGENT: " agent ",
+  PI_SUBAGENT_RUN_ID: " run ",
+  PI_SUBAGENT_PARENT_SESSION_ID: " parent ",
+  PI_SUBAGENT_CHILD_INDEX: "3",
+};
+
+for (const { name, env, launch, parentSessionId } of [
+  { name: "no input", env: {}, launch: {}, parentSessionId: undefined },
+  ...[undefined, "0", "1"].map((gate) => ({
+    name: `cohort gate ${gate}`,
+    env: { ...cohortEnv, PI_SUBAGENT_CHILD: gate },
+    launch: gate === "1" ? { agent: "agent", runId: "run" } : {},
+    parentSessionId: gate === "1" ? "parent" : undefined,
+  })),
+  {
+    name: "generic alone",
+    env: {
+      PI_TOUCHTONE_METADATA:
+        '{"agent":" generic ","parentSessionId":" parent "}',
+    },
+    launch: { agent: "generic" },
+    parentSessionId: "parent",
+  },
+  {
+    name: "generic overrides retained keys",
+    env: {
+      ...cohortEnv,
+      PI_TOUCHTONE_METADATA:
+        '{"agent":"other","ticket":" GH-31 ","parentSessionId":"other-parent"}',
+    },
+    launch: { agent: "other", runId: "run", ticket: "GH-31" },
+    parentSessionId: "other-parent",
+  },
+  {
+    name: "dropped generic values preserve fallback",
+    env: {
+      ...cohortEnv,
+      PI_TOUCHTONE_METADATA:
+        '{"agent":" ","runId":7,"parentSessionId":null,"array":[],"object":{},"flag":false,"ticket":" ok "}',
+    },
+    launch: { agent: "agent", runId: "run", ticket: "ok" },
+    parentSessionId: "parent",
+  },
+  {
+    name: "self parent removed",
+    env: { ...cohortEnv, PI_TOUCHTONE_METADATA: '{"parentSessionId":" own "}' },
+    launch: { agent: "agent", runId: "run" },
+    parentSessionId: undefined,
+  },
+]) {
+  test(`launchMetadata normalizes ${name} without side effects`, () => {
+    const before = { ...env };
+    assert.deepEqual(launchMetadata(Object.freeze(env), "own"), {
+      launch,
+      parentSessionId,
+      warning: undefined,
+    });
+    assert.deepEqual(env, before);
+    assert.equal(globals[launchSlot], undefined);
+  });
+}
+
+const byteLimit = 65_536;
+const exactMetadata = JSON.stringify({ ticket: "x".repeat(byteLimit - 13) });
+for (const [name, raw] of [
+  ["empty", ""],
+  ["invalid JSON", "{\nsecret"],
+  ["null", "null"],
+  ["array", "[]"],
+  ["string", '"text"'],
+  ["number", "1"],
+  ["boolean", "true"],
+  ["one byte overflow", `${exactMetadata} `],
+  ["multibyte overflow", JSON.stringify({ ticket: "é".repeat(32_762) })],
+]) {
+  test(`launchMetadata rejects ${name} and preserves cohort values`, () => {
+    const env = Object.freeze({ ...cohortEnv, PI_TOUCHTONE_METADATA: raw });
+    const before = { ...env };
+    const result = launchMetadata(env, "own");
+    assert.equal(typeof result.warning, "string");
+    assert.ok(result.warning);
+    assert.doesNotMatch(result.warning, /[\r\n]/);
+    assert.ok(!result.warning.includes(raw) || raw === "");
+    assert.deepEqual(result, {
+      launch: { agent: "agent", runId: "run" },
+      parentSessionId: "parent",
+      warning: result.warning,
+    });
+    assert.deepEqual(env, before);
+  });
+}
+
+test("launchMetadata accepts exactly 65536 UTF-8 bytes and safe arbitrary keys", () => {
+  assert.equal(Buffer.byteLength(exactMetadata, "utf8"), byteLimit);
+  assert.equal(Buffer.byteLength(`${exactMetadata} `, "utf8"), byteLimit + 1);
+  const multibyte = JSON.stringify({ ticket: "é".repeat(32_762) });
+  assert.ok(multibyte.length < byteLimit);
+  assert.ok(Buffer.byteLength(multibyte, "utf8") > byteLimit);
+  assert.deepEqual(
+    launchMetadata({ PI_TOUCHTONE_METADATA: exactMetadata }, "own"),
+    {
+      launch: { ticket: "x".repeat(byteLimit - 13) },
+      parentSessionId: undefined,
+      warning: undefined,
+    },
+  );
+  const result = launchMetadata(
+    { PI_TOUCHTONE_METADATA: '{"__proto__":" safe ","constructor":" value "}' },
+    "own",
+  );
+  assert.deepEqual(result, {
+    launch: JSON.parse('{"__proto__":"safe","constructor":"value"}'),
+    parentSessionId: undefined,
+    warning: undefined,
+  });
+  assert.equal(Object.getPrototypeOf(result.launch), Object.prototype);
+  assert.ok(
+    Object.values(result.launch).every(
+      (value) => typeof value === "string" && value.trim().length > 0,
+    ),
+  );
+});
+
 const roots: string[] = [];
+const handleVariables = [
+  ["CMUX_WORKSPACE_ID", "cmux.workspace"],
+  ["CMUX_SURFACE_ID", "cmux.surface"],
+  ["CMUX_PANEL_ID", "cmux.panel"],
+  ["HERDR_WORKSPACE_ID", "herdr.workspace"],
+  ["HERDR_TAB_ID", "herdr.tab"],
+  ["HERDR_PANE_ID", "herdr.pane"],
+  ["TMUX_PANE", "tmux.pane"],
+  ["ZELLIJ_SESSION_NAME", "zellij.session"],
+  ["ZELLIJ_PANE_ID", "zellij.pane"],
+  ["WEZTERM_PANE", "wezterm.pane"],
+  ["KITTY_WINDOW_ID", "kitty.window"],
+] as const;
+const environmentVariables = [
+  ...handleVariables.map(([variable]) => variable),
+  "PI_TOUCHTONE_METADATA",
+  "PI_SUBAGENT_CHILD",
+  "PI_SUBAGENT_CHILD_AGENT",
+  "PI_SUBAGENT_RUN_ID",
+  "PI_SUBAGENT_PARENT_SESSION_ID",
+  "PI_SUBAGENT_CHILD_INDEX",
+];
+// Keep top-level tests serial: registration mutates process-global state.
+const launchSlot = Symbol.for("pi-touchtone.launch.v1");
+const globals = globalThis as unknown as Record<symbol, unknown>;
+let savedEnvironment: Array<[string, string | undefined]>;
+let savedSlot: PropertyDescriptor | undefined;
+beforeEach(() => {
+  savedEnvironment = environmentVariables.map((key) => [key, process.env[key]]);
+  for (const key of environmentVariables) delete process.env[key];
+  savedSlot = Object.getOwnPropertyDescriptor(globalThis, launchSlot);
+  delete globals[launchSlot];
+});
 
 // Terminal escape sequences require the ESC control character, which Biome's
 // noControlCharactersInRegex flags inside regex literals. Building the pattern
@@ -36,6 +195,12 @@ const ESC = "\x1b";
 const ansi = (pattern: string): RegExp => new RegExp(`${ESC}${pattern}`);
 
 afterEach(() => {
+  for (const [key, value] of savedEnvironment) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  delete globals[launchSlot];
+  if (savedSlot) Object.defineProperty(globalThis, launchSlot, savedSlot);
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true });
 });
@@ -89,6 +254,11 @@ test("phonebook ignores sidecar keys that collide with core fields", () => {
   store.writeMetadata("alice", "evil", {
     sessionId: "mallory",
     pid: ["1"],
+    sessionName: "forged-name",
+    cwd: "forged-cwd",
+    handles: "forged-handles",
+    launch: "forged-launch",
+    parentSessionId: "forged-parent",
     updatedAt: "addressable-timestamp",
   });
   const [entry] = store.phonebook();
@@ -138,24 +308,133 @@ test("removeMetadata removes one publisher contribution", () => {
   assert.ok(after.selectors.includes("/tmp/alice"));
 });
 
-test("phonebook includes each optional cmux selector exactly once", () => {
+test("phonebook orders core, handle, launch, and sidecar selectors without dialing parent", () => {
   const store = new TouchtoneStore({ root: temporaryRoot() });
   store.initialize("alice");
   store.register(
     rosterSession("alice", {
-      cmuxWorkspace: "workspace-1",
-      cmuxSurface: "surface-1",
-      cmuxPanel: "panel-1",
+      sessionName: "Alice",
+      handles: Object.fromEntries(
+        handleVariables.map(([, key], index) => [key, `handle-${index}`]),
+      ),
+      launch: { agent: "worker", runId: "run-1", duplicate: "handle-1" },
+      parentSessionId: "parent-only",
     }),
   );
 
+  store.writeMetadata("alice", "ticket", {
+    ticket: ["handle-1", "run-1", "E-123"],
+  });
   const [entry] = store.phonebook();
-  for (const selector of ["workspace-1", "surface-1", "panel-1"]) {
-    assert.equal(
-      entry.selectors.filter((value) => value === selector).length,
-      1,
+  assert.deepEqual(entry.selectors, [
+    "alice",
+    "Alice",
+    String(process.pid),
+    "/tmp/alice",
+    ...handleVariables.map((_, index) => `handle-${index}`),
+    "worker",
+    "run-1",
+    "E-123",
+  ]);
+});
+
+for (const [variable, key] of handleVariables) {
+  test(`registration publishes trimmed ${variable}`, async (t) => {
+    const root = temporaryRoot();
+    process.env[variable] = "  pane-value  ";
+    const child = harness("child", "Child", root);
+    t.after(() => child.event("session_shutdown"));
+    await child.event("session_start");
+    assert.deepEqual(
+      new TouchtoneStore({ root }).phonebook()[0].session.handles,
+      { [key]: "pane-value" },
     );
+  });
+}
+
+test("registration omits blank handles", async (t) => {
+  const root = temporaryRoot();
+  for (const [variable] of handleVariables) process.env[variable] = " \t ";
+  const child = harness("child", "Child", root);
+  t.after(() => child.event("session_shutdown"));
+  await child.event("session_start");
+  assert.equal(
+    new TouchtoneStore({ root }).phonebook()[0].session.handles,
+    undefined,
+  );
+});
+
+test("registration publishes cmux and herdr together in table order", async (t) => {
+  const root = temporaryRoot();
+  const expected = Object.fromEntries(
+    handleVariables.slice(0, 6).map(([variable, key], index) => {
+      process.env[variable] = ` handle-${index} `;
+      return [key, `handle-${index}`];
+    }),
+  );
+  const child = harness("child", "Child", root);
+  t.after(() => child.event("session_shutdown"));
+  await child.event("session_start");
+  const [entry] = new TouchtoneStore({ root }).phonebook();
+  assert.deepEqual(entry.session.handles, expected);
+  assert.deepEqual(entry.selectors, [
+    "child",
+    "Child",
+    String(process.pid),
+    path.join(os.tmpdir(), "Child"),
+    ...Object.values(expected),
+  ]);
+});
+
+for (const field of ["handles", "launch", "parentSessionId"]) {
+  const invalid =
+    field === "parentSessionId"
+      ? [null, [], {}, 1, " "]
+      : [null, [], { bad: {} }, { good: "retained", bad: 1 }, { bad: " " }];
+  for (const value of invalid) {
+    test(`phonebook drops malformed ${field}: ${JSON.stringify(value)}`, () => {
+      const root = temporaryRoot();
+      const store = new TouchtoneStore({ root });
+      store.initialize("alice");
+      const valid = {
+        handles: { "kitty.window": " 1 " },
+        launch: { agent: " worker " },
+        parentSessionId: " parent ",
+      };
+      fs.writeFileSync(
+        path.join(store.paths.sessions, "alice.json"),
+        JSON.stringify({ ...rosterSession("alice"), ...valid, [field]: value }),
+      );
+      const [entry] = store.phonebook();
+      const expected: Record<string, unknown> = { ...valid };
+      delete expected[field];
+      assert.deepEqual(entry.session, {
+        ...rosterSession("alice"),
+        ...expected,
+      });
+    });
   }
+}
+
+test("legacy cmux fields are not handles or selectors", () => {
+  const store = new TouchtoneStore({ root: temporaryRoot() });
+  store.initialize("alice");
+  fs.writeFileSync(
+    path.join(store.paths.sessions, "alice.json"),
+    JSON.stringify({
+      ...rosterSession("alice"),
+      cmuxWorkspace: "old-w",
+      cmuxSurface: "old-s",
+      cmuxPanel: "old-p",
+    }),
+  );
+  const [entry] = store.phonebook();
+  assert.equal(entry.session.handles, undefined);
+  assert.deepEqual(entry.selectors, [
+    "alice",
+    String(process.pid),
+    "/tmp/alice",
+  ]);
 });
 
 test("phonebook ignores sidecars for unknown sessions", () => {
@@ -244,9 +523,13 @@ test("broadcast matches every phonebook value, dedupes, and excludes self", () =
   const root = temporaryRoot();
   const store = new TouchtoneStore({ root });
   store.initialize("alice");
-  store.register(rosterSession("alice", { cmuxWorkspace: "ws-1" }));
+  store.register(
+    rosterSession("alice", { handles: { "cmux.workspace": "ws-1" } }),
+  );
   store.initialize("bob");
-  store.register(rosterSession("bob", { cmuxWorkspace: "ws-1" }));
+  store.register(
+    rosterSession("bob", { handles: { "cmux.workspace": "ws-1" } }),
+  );
 
   const outcome = store.broadcast(
     rosterSession("alice"),
@@ -516,7 +799,14 @@ type HarnessTool = {
   }>;
 };
 
-function harness(id: string, name: string, root: string, pid = process.pid) {
+function harness(
+  id: string,
+  name: string,
+  root: string,
+  pid = process.pid,
+  factory = createTouchtoneExtension,
+) {
+  const notifications: Array<{ message: string; severity: string }> = [];
   const handlers = new Map<
     string,
     Array<(event: unknown, context: unknown) => Promise<void>>
@@ -576,7 +866,7 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
       else delivered.push({ message, options });
     },
   };
-  createTouchtoneExtension({ root, pid, pollMs: 20 })(pi as never);
+  factory({ root, pid, pollMs: 20 })(pi as never);
   const context = {
     cwd: path.join(os.tmpdir(), name),
     mode: "tui",
@@ -584,6 +874,9 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
     hasPendingMessages: () => steered.length > 0,
     isIdle: () => !busy,
     ui: {
+      notify(message: string, severity: string) {
+        notifications.push({ message, severity });
+      },
       setWidget(
         _key: string,
         factory:
@@ -605,6 +898,13 @@ function harness(id: string, name: string, root: string, pid = process.pid) {
   return {
     delivered,
     steered,
+    notifications,
+    setSessionId(value: string) {
+      id = value;
+    },
+    setSessionName(value: string) {
+      name = value;
+    },
     onDeckCounts() {
       return emitted
         .filter(({ channel }) => channel === ON_DECK_EVENT)
@@ -781,15 +1081,7 @@ test("registers the tool, lists live sessions, and wakes an idle recipient", asy
 
   const list = await alice.tool({ action: "list" });
   const expectedSelectors = (id: string, name: string) =>
-    [
-      id,
-      name,
-      String(process.pid),
-      path.join(os.tmpdir(), name),
-      process.env.CMUX_WORKSPACE_ID,
-      process.env.CMUX_SURFACE_ID,
-      process.env.CMUX_PANEL_ID,
-    ].filter(
+    [id, name, String(process.pid), path.join(os.tmpdir(), name)].filter(
       (value, index, values): value is string =>
         Boolean(value) && values.indexOf(value) === index,
     );
@@ -879,7 +1171,7 @@ test("tool description documents broadcast selectors and untrusted content", () 
   const description = alice.toolDescription();
   assert.match(
     description,
-    /send a message to a group of sessions at once; each selector matches every session whose phonebook values contain it — session id, name, cwd, pid, cmux handles, or contributed metadata such as a ticket id/,
+    /send a message to a group of sessions at once; each selector matches every session whose phonebook values contain it — session id, name, cwd, pid, terminal handles, or contributed metadata such as a ticket id/,
   );
   assert.match(
     description,
@@ -889,7 +1181,7 @@ test("tool description documents broadcast selectors and untrusted content", () 
   // shared-locator contract, not the old send-only/broadcast-only one.
   for (const name of ["to", "selectors"]) {
     const property = alice.toolParameterDescription(name);
-    assert.match(property, /session id, name, cwd, pid, cmux handle/);
+    assert.match(property, /session id, name, cwd, pid, terminal handle/);
     assert.match(property, /list filters/);
     assert.doesNotMatch(property, /send only|broadcast only/);
   }
@@ -1308,6 +1600,268 @@ test("list output shows copyable selectors as JSON per session", async (t) => {
   assert.equal(details.broadcast.delivered, 1);
 });
 
+test("list snapshots parent annotations from the full roster without regrouping", async (t) => {
+  const root = temporaryRoot();
+  const caller = harness("caller", "Caller", root);
+  t.after(() => caller.event("session_shutdown"));
+  await caller.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.register(rosterSession("parent-a", { sessionName: "Parent" }));
+  store.register(
+    rosterSession("child-a", {
+      sessionName: "Child",
+      parentSessionId: "parent-a",
+    }),
+  );
+  store.register(rosterSession("child-b", { parentSessionId: "unnamed" }));
+  store.register(rosterSession("unnamed", { sessionName: "" }));
+  store.register(rosterSession("child-c", { parentSessionId: "gone" }));
+  const full = await caller.tool({ action: "list" });
+  const details = full.details as {
+    sessions: TouchtoneSession[];
+    parentAnnotations: Record<string, string>;
+  };
+  assert.deepEqual(
+    details.sessions.map((s) => s.sessionId),
+    store.phonebook().map((e) => e.session.sessionId),
+  );
+  assert.deepEqual(
+    { ...details.parentAnnotations },
+    {
+      "child-a": "spawned by Parent (parent-a)",
+      "child-b": "spawned by unnamed",
+      "child-c": "spawned by gone (not live)",
+    },
+  );
+  for (const [id, annotation] of Object.entries(details.parentAnnotations)) {
+    const line = full.content[0].text
+      .split("\n")
+      .find((line) => line.startsWith(`- ${id} - `));
+    assert.ok(line?.includes(` - ${annotation} - pid `));
+    const table = caller
+      .renderToolResult(full, { action: "list" }, true)
+      .render(160);
+    assert.ok(table.includes(annotation));
+  }
+  const filtered = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(
+    filtered.content[0].text,
+    /Child - spawned by Parent \(parent-a\) - pid/,
+  );
+  const before = JSON.stringify(filtered);
+  const rendered = caller
+    .renderToolResult(filtered, { action: "list" }, true)
+    .render(160);
+  store.register(rosterSession("parent-a", { sessionName: "Renamed" }));
+  assert.deepEqual(
+    caller.renderToolResult(filtered, { action: "list" }, true).render(160),
+    rendered,
+  );
+  store.register(rosterSession("parent-a", { sessionName: "" }));
+  const unnamedParent = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(
+    unnamedParent.content[0].text,
+    /Child - spawned by parent-a - pid/,
+  );
+  assert.ok(
+    caller
+      .renderToolResult(unnamedParent, { action: "list" }, true)
+      .render(160)
+      .includes("spawned by parent-a"),
+  );
+  store.unregister("parent-a", process.pid);
+  store.register(rosterSession("parent-new", { sessionName: "Parent" }));
+  assert.equal(JSON.stringify(filtered), before);
+  assert.deepEqual(
+    caller.renderToolResult(filtered, { action: "list" }, true).render(160),
+    rendered,
+  );
+  const fresh = await caller.tool({ action: "list", to: "child-a" });
+  assert.match(fresh.content[0].text, /spawned by parent-a \(not live\)/);
+  assert.ok(
+    caller
+      .renderToolResult(fresh, { action: "list" }, true)
+      .render(160)
+      .includes("spawned by parent-a (not live)"),
+  );
+});
+
+for (const [, key] of handleVariables) {
+  test(`raw ${key} supports unique send, list, and broadcast`, async (t) => {
+    const root = temporaryRoot();
+    const caller = harness("caller", "Caller", root);
+    t.after(() => caller.event("session_shutdown"));
+    await caller.event("session_start");
+    const store = new TouchtoneStore({ root });
+    store.register(rosterSession("child", { handles: { [key]: "1" } }));
+    const listed = await caller.tool({ action: "list", to: "1" });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions.map(
+        (s) => s.sessionId,
+      ),
+      ["child"],
+    );
+    const sent = await caller.tool({
+      action: "send",
+      to: "1",
+      message: "hello",
+    });
+    assert.equal(
+      (sent.details as { recipient: TouchtoneSession }).recipient.sessionId,
+      "child",
+    );
+    const broadcast = await caller.tool({
+      action: "broadcast",
+      to: "1",
+      message: "hello",
+    });
+    assert.deepEqual(
+      (
+        broadcast.details as { broadcast: { recipients: TouchtoneSession[] } }
+      ).broadcast.recipients.map((s) => s.sessionId),
+      ["child"],
+    );
+  });
+}
+
+test("launch selectors dial children without dialing their parent; collisions stay ambiguous", async (t) => {
+  const root = temporaryRoot();
+  const caller = harness("caller", "Caller", root);
+  t.after(() => caller.event("session_shutdown"));
+  await caller.event("session_start");
+  const store = new TouchtoneStore({ root });
+  store.register(
+    rosterSession("parent-a", {
+      sessionName: "Parent",
+      handles: { "kitty.window": "shared" },
+    }),
+  );
+  for (const id of ["a", "b"]) {
+    const normalized = launchMetadata(
+      {
+        PI_SUBAGENT_CHILD: "1",
+        PI_SUBAGENT_CHILD_AGENT: ` worker-${id} `,
+        PI_SUBAGENT_RUN_ID: " run ",
+      },
+      id,
+    );
+    store.register(
+      rosterSession(id, {
+        launch: {
+          ...normalized.launch,
+          ticket: `ticket-${id}`,
+          collision: "Parent",
+        },
+        handles: { "kitty.window": "shared" },
+        ...(id === "a" ? { parentSessionId: "parent-a" } : {}),
+      }),
+    );
+  }
+  for (const [locator, id] of [
+    ["worker-a", "a"],
+    ["ticket-a", "a"],
+    ["parent-a", "parent-a"],
+  ]) {
+    const sent = await caller.tool({
+      action: "send",
+      to: locator,
+      message: "hello",
+    });
+    assert.equal(
+      (sent.details as { recipient: TouchtoneSession }).recipient.sessionId,
+      id,
+    );
+    const listed = await caller.tool({ action: "list", to: locator });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions.map(
+        (s) => s.sessionId,
+      ),
+      [id],
+    );
+  }
+  for (const [locator, ids] of [
+    ["run", ["a", "b"]],
+    ["shared", ["a", "b", "parent-a"]],
+  ] as const) {
+    const listed = await caller.tool({ action: "list", to: locator });
+    assert.deepEqual(
+      (listed.details as { sessions: TouchtoneSession[] }).sessions
+        .map((s) => s.sessionId)
+        .sort(),
+      [...ids],
+    );
+    const sent = await caller.tool({
+      action: "broadcast",
+      to: locator,
+      message: "hello",
+    });
+    assert.deepEqual(
+      (
+        sent.details as { broadcast: { recipients: TouchtoneSession[] } }
+      ).broadcast.recipients
+        .map((s) => s.sessionId)
+        .sort(),
+      [...ids],
+    );
+  }
+  const collisionChild = store
+    .phonebook()
+    .find((entry) => entry.session.sessionId === "a")?.session;
+  assert.ok(collisionChild);
+  store.register({
+    ...collisionChild,
+    launch: { ...collisionChild.launch, idCollision: "parent-a" },
+  });
+  await assert.rejects(
+    caller.tool({ action: "send", to: "parent-a", message: "hello" }),
+    /delivers to exactly one session/,
+  );
+  // A launch value colliding with an ID or name retains the same ambiguity.
+  for (const locator of ["shared", "run", "Parent"]) {
+    await assert.rejects(
+      caller.tool({ action: "send", to: locator, message: "hello" }),
+      /delivers to exactly one session/,
+    );
+  }
+  const noParent = await caller.tool({ action: "list", to: "worker-b" });
+  assert.doesNotMatch(noParent.content[0].text, /spawned by/);
+  assert.deepEqual(
+    (noParent.details as { sessions: TouchtoneSession[] }).sessions.map(
+      (s) => s.sessionId,
+    ),
+    ["b"],
+  );
+  store.unregister("b", process.pid);
+  const uniqueRun = await caller.tool({
+    action: "send",
+    to: "run",
+    message: "hello",
+  });
+  assert.equal(
+    (uniqueRun.details as { recipient: TouchtoneSession }).recipient.sessionId,
+    "a",
+  );
+  const child = await caller.tool({ action: "list", to: "worker-a" });
+  assert.match(child.content[0].text, /spawned by Parent/);
+});
+
+test("missing locators describe terminal handles and end with working examples", async () => {
+  const caller = harness("caller", "Caller", temporaryRoot());
+  for (const action of ["send", "broadcast"] as const) {
+    await assert.rejects(
+      caller.tool({ action, message: "hello" }),
+      (error: Error) => {
+        assert.match(error.message, /terminal handle/);
+        assert.match(
+          error.message,
+          /Example of a successful touchtone call:\n\{[^\n]+\}$/,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test("renders a compact roster summary and an expanded width-aware table", async () => {
   const root = temporaryRoot();
   const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
@@ -1317,15 +1871,26 @@ test("renders a compact roster summary and an expanded width-aware table", async
       sessionName: "Bob",
       pid: 12345,
       cwd: "/界/path",
-      cmuxWorkspace: "workspace-1",
-      cmuxSurface: "surface-2",
-      cmuxPanel: "panel-3",
+      handles: {
+        "cmux.workspace": "workspace-1",
+        "cmux.surface": "surface-2",
+        "cmux.panel": "panel-3",
+        "herdr.workspace": "wE",
+        "herdr.tab": "wE:t2",
+        "herdr.pane": "wE:p2",
+      },
       updatedAt: new Date().toISOString(),
     },
   ];
   const result = {
     content: [{ type: "text", text: "model-facing roster remains unchanged" }],
-    details: { sessions },
+    details: {
+      sessions,
+      parentAnnotations: {
+        [sessions[0].sessionId]:
+          `spawned by ${"界Parent".repeat(30)} (${"parent-id".repeat(30)})`,
+      },
+    },
   };
 
   assert.deepEqual(alice.renderToolCall({ action: "list" }).render(80), []);
@@ -1452,9 +2017,24 @@ test("renders a compact roster summary and an expanded width-aware table", async
   assert.match(plainExpanded.join("\n"), /Bob/);
   assert.match(plainExpanded.join("\n"), /12345/);
   assert.match(plainExpanded.join("\n"), /\/界\/path/);
-  assert.match(plainExpanded.join("\n"), /workspace-1 surface-2/);
-  assert.match(plainExpanded.join("\n"), /panel-3/);
+  assert.match(
+    plainExpanded.join("\n"),
+    /workspace-1 surface-2 panel-3 wE wE:t2 wE:p2/,
+  );
   assert.ok(expanded.every((line) => visibleWidth(line) <= 160));
+  const annotationStart = plainExpanded.findIndex((line) =>
+    line.startsWith("spawned by "),
+  );
+  assert.ok(annotationStart > 3);
+  assert.ok(visibleWidth(plainExpanded[annotationStart]) > 16);
+  const historical = { ...result, details: { sessions } };
+  assert.doesNotMatch(
+    alice
+      .renderToolResult(historical, { action: "list" }, true)
+      .render(160)
+      .join("\n"),
+    /spawned by/,
+  );
 
   const compact = alice.renderToolResult(result, { action: "list" });
   for (const width of [1, 5, 10]) {
@@ -1481,7 +2061,7 @@ test("renders a compact roster summary and an expanded width-aware table", async
     expandedRoster.render(60).join("\n"),
     /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/,
   );
-  for (let width = 1; width <= 80; width += 1) {
+  for (let width = 1; width <= 160; width += 1) {
     const lines = expandedRoster.render(width);
     assert.ok(
       lines.every((line) => visibleWidth(line) <= width),
@@ -2659,3 +3239,119 @@ test("a fresh installation uses the default inbox", () => {
   assert.equal(fs.statSync(path.join(root, "sessions")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(root, "inboxes")).isDirectory(), true);
 });
+
+test("registration snapshots launch identity across switches, rename, and fresh-module reload", async () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  Object.assign(process.env, cohortEnv, {
+    PI_TOUCHTONE_METADATA: '{"agent":"generic","parentSessionId":"parent-a"}',
+    HERDR_PANE_ID: "pane-a",
+  });
+  const child = harness("child-a", "Child", root);
+  let reloaded: ReturnType<typeof harness> | undefined;
+  try {
+    assert.ok(process.env.PI_TOUCHTONE_METADATA);
+    assert.equal(globals[launchSlot], undefined);
+    assert.deepEqual(child.notifications, []);
+    await child.event("session_start");
+    const expectedLaunch = { agent: "generic", runId: "run" };
+    const current = () => store.liveSessions()[0];
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    assert.equal(process.env.PI_TOUCHTONE_METADATA, undefined);
+    for (const [key, value] of Object.entries(cohortEnv))
+      assert.equal(process.env[key], value);
+    process.env.PI_SUBAGENT_RUN_ID = "changed";
+    process.env.HERDR_PANE_ID = "pane-b";
+    await child.event("session_start");
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.deepEqual(current().handles, { "herdr.pane": "pane-b" });
+    for (const [previous, next, parent] of [
+      ["child-a", "parent-a", undefined],
+      ["parent-a", "child-b", "parent-a"],
+    ] as const) {
+      child.setSessionId(next);
+      await child.event("session_start");
+      assert.equal(fs.existsSync(store.rosterFile(previous)), false);
+      assert.deepEqual(
+        store.phonebook().map(({ session }) => session.sessionId),
+        [next],
+      );
+      assert.equal(current().parentSessionId, parent);
+      assert.deepEqual(current().launch, expectedLaunch);
+    }
+    child.setSessionName("Renamed");
+    await child.event("session_info_changed");
+    assert.equal(current().sessionName, "Renamed");
+    assert.deepEqual(current().handles, { "herdr.pane": "pane-b" });
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    await child.event("session_shutdown");
+    const fresh = await import(
+      `${pathToFileURL(path.resolve("extension.ts")).href}?launch-reload`
+    );
+    reloaded = harness(
+      "child-b",
+      "Reloaded",
+      root,
+      process.pid,
+      fresh.createTouchtoneExtension,
+    );
+    await reloaded.event("session_start");
+    assert.deepEqual(current().launch, expectedLaunch);
+    assert.equal(current().parentSessionId, "parent-a");
+    store.initialize("sender");
+    store.register(rosterSession("sender"));
+    const outcome = store.broadcast(rosterSession("sender"), ["run"], "hello");
+    assert.equal(outcome.delivered, 1);
+  } finally {
+    await child.event("session_shutdown");
+    await reloaded?.event("session_shutdown");
+  }
+});
+
+for (const raw of ["{broken", "null"]) {
+  test(`invalid launch ${raw} warns once across registration and fresh-module reload`, async () => {
+    Object.assign(process.env, cohortEnv, { PI_TOUCHTONE_METADATA: raw });
+    const root = temporaryRoot();
+    const child = harness("child", "Child", root);
+    let reloaded: ReturnType<typeof harness> | undefined;
+    try {
+      assert.equal(process.env.PI_TOUCHTONE_METADATA, raw);
+      assert.equal(child.notifications.length, 0);
+      assert.equal(globals[launchSlot], undefined);
+      await child.event("session_start");
+      const store = new TouchtoneStore({ root });
+      assert.deepEqual(store.liveSessions()[0].launch, {
+        agent: "agent",
+        runId: "run",
+      });
+      assert.equal(process.env.PI_TOUCHTONE_METADATA, undefined);
+      assert.equal(child.notifications.length, 1);
+      assert.equal(child.notifications[0].severity, "warning");
+      assert.match(child.notifications[0].message, /PI_TOUCHTONE_METADATA/);
+      await child.event("session_start");
+      assert.equal(child.notifications.length, 1);
+      await child.event("session_shutdown");
+      const fresh = await import(
+        `${pathToFileURL(path.resolve("extension.ts")).href}?warning-reload=${encodeURIComponent(raw)}`
+      );
+      reloaded = harness(
+        "child",
+        "Reloaded",
+        root,
+        process.pid,
+        fresh.createTouchtoneExtension,
+      );
+      await reloaded.event("session_start");
+      assert.deepEqual(reloaded.notifications, []);
+      assert.deepEqual(store.liveSessions()[0].launch, {
+        agent: "agent",
+        runId: "run",
+      });
+    } finally {
+      await child.event("session_shutdown");
+      await reloaded?.event("session_shutdown");
+    }
+  });
+}
