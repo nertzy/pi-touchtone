@@ -62,7 +62,7 @@ as dialed.”** is proposed wording, not a settled string.
 
 ### Callback
 
-**“*️⃣6️⃣9️⃣ Call back”** replies to the sender of the most recently **picked-up**
+**“\*️⃣6️⃣9️⃣ Call back”** replies to the sender of the most recently **picked-up**
 incoming message, not the most recent arrival. Preserve that sender's identity.
 If the endpoint has gone, allow unambiguous rediscovery of the same conversation;
 if resolution is ambiguous, send nothing and return choices.
