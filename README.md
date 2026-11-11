@@ -23,12 +23,12 @@ both the sending and receiving sessions' Pi configurations.
 
 Touchtone ships one tool, `touchtone`, with three actions:
 
-| Argument | `list` | `send` | `broadcast` |
-| --- | --- | --- | --- |
-| `action` | Required: `"list"` | Required: `"send"` | Required: `"broadcast"` |
-| `to` | Optional: filter locator | One destination locator | One more destination locator |
-| `selectors` | Optional: filter locators | More destination locators | Destination locators |
-| `message` | Ignored | Required: nonempty plain-text string | Required: nonempty plain-text string |
+| Argument    | `list`                    | `send`                               | `broadcast`                          |
+| ----------- | ------------------------- | ------------------------------------ | ------------------------------------ |
+| `action`    | Required: `"list"`        | Required: `"send"`                   | Required: `"broadcast"`              |
+| `to`        | Optional: filter locator  | One destination locator              | One more destination locator         |
+| `selectors` | Optional: filter locators | More destination locators            | Destination locators                 |
+| `message`   | Ignored                   | Required: nonempty plain-text string | Required: nonempty plain-text string |
 
 Destination locators are a common interface: a locator is any value a session
 advertises — an exact session ID, session name, working directory, PID,
@@ -81,14 +81,14 @@ session.
 Touchtone reads these environment variables, trims their values, and advertises
 non-blank values as terminal handles:
 
-| Terminal | Environment variables | Handle names (in the same order) |
-| --- | --- | --- |
-| cmux | `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, `CMUX_PANEL_ID` | `cmux.workspace`, `cmux.surface`, `cmux.panel` |
-| herdr | `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID` | `herdr.workspace`, `herdr.tab`, `herdr.pane` |
-| tmux | `TMUX_PANE` | `tmux.pane` |
-| zellij | `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID` | `zellij.session`, `zellij.pane` |
-| WezTerm | `WEZTERM_PANE` | `wezterm.pane` |
-| kitty | `KITTY_WINDOW_ID` | `kitty.window` |
+| Terminal | Environment variables                                   | Handle names (in the same order)               |
+| -------- | ------------------------------------------------------- | ---------------------------------------------- |
+| cmux     | `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`, `CMUX_PANEL_ID` | `cmux.workspace`, `cmux.surface`, `cmux.panel` |
+| herdr    | `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID`   | `herdr.workspace`, `herdr.tab`, `herdr.pane`   |
+| tmux     | `TMUX_PANE`                                             | `tmux.pane`                                    |
+| zellij   | `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`                 | `zellij.session`, `zellij.pane`                |
+| WezTerm  | `WEZTERM_PANE`                                          | `wezterm.pane`                                 |
+| kitty    | `KITTY_WINDOW_ID`                                       | `kitty.window`                                 |
 
 **Children and subshells inherit the same terminal handles.** `send` refuses
 an ambiguous handle; `broadcast` reaches all matching sessions, including
@@ -191,11 +191,11 @@ Any other retained string value is also dialable.
 
 Touchtone also recognizes these pi-cohort launch inputs:
 
-| Variable | Meaning |
-| --- | --- |
-| `PI_SUBAGENT_CHILD=1` | Enables reading the following `PI_SUBAGENT_*` values |
-| `PI_SUBAGENT_CHILD_AGENT` | Maps to `agent` |
-| `PI_SUBAGENT_RUN_ID` | Maps to `runId` |
+| Variable                        | Meaning                                                   |
+| ------------------------------- | --------------------------------------------------------- |
+| `PI_SUBAGENT_CHILD=1`           | Enables reading the following `PI_SUBAGENT_*` values      |
+| `PI_SUBAGENT_CHILD_AGENT`       | Maps to `agent`                                           |
+| `PI_SUBAGENT_RUN_ID`            | Maps to `runId`                                           |
 | `PI_SUBAGENT_PARENT_SESSION_ID` | Maps to non-dialable `parentSessionId` (pi-cohort 7.6.3+) |
 
 Retained generic values override these gated inputs per key. A blank or
@@ -324,14 +324,14 @@ chooses a smaller interface rather than attempting to replace all of it.
 
 Comparison checked against **pi-intercom 0.13.0**:
 
-| | Touchtone | pi-intercom |
-| --- | --- | --- |
-| Transport | Shared-file inboxes; no broker | Local IPC broker |
-| Agent interface | `list`, nonblocking `send`, and selector-based `broadcast` | Also blocking `ask`, reply tracking, and cancellation |
-| Addressing | Shared phonebook locators for `send` (must resolve to one session) and `broadcast` (reaches every match) | Session names or IDs |
-| Messages | Plain text | Text and attachments |
-| Delivery tracking | Inbox write, no receipt protocol | Delivery/read receipts and pending request state |
-| Interactive UI | Chat bubbles and an on-deck handset indicator | Keyboard-driven overlay and richer session controls |
+|                   | Touchtone                                                                                                | pi-intercom                                           |
+| ----------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Transport         | Shared-file inboxes; no broker                                                                           | Local IPC broker                                      |
+| Agent interface   | `list`, nonblocking `send`, and selector-based `broadcast`                                               | Also blocking `ask`, reply tracking, and cancellation |
+| Addressing        | Shared phonebook locators for `send` (must resolve to one session) and `broadcast` (reaches every match) | Session names or IDs                                  |
+| Messages          | Plain text                                                                                               | Text and attachments                                  |
+| Delivery tracking | Inbox write, no receipt protocol                                                                         | Delivery/read receipts and pending request state      |
+| Interactive UI    | Chat bubbles and an on-deck handset indicator                                                            | Keyboard-driven overlay and richer session controls   |
 
 Both can steer busy interactive sessions. Touchtone always requests a turn
 for incoming messages; pi-intercom offers configurable inbound triggering.

@@ -48,13 +48,13 @@ whose pickup status is unknown; do not automatically resend the latter.
 
 ### Calling vocabulary
 
-| Presentation | Meaning |
-| --- | --- |
-| 📞 Connected | The receiver is off hook. |
-| 🎵 On hold | Pending calls, with animated dots and at most five 📞 handsets plus `+N`. |
-| ☎️ Call Waiting | An incoming message has not been picked up, whether the agent is busy or idle. |
-| ☎️ Hung Up | The endpoint has stopped; its recent conversation peers should be notified. |
-| “This number is no longer in service” | A confirmed past endpoint is gone. |
+| Presentation                          | Meaning                                                                        |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| 📞 Connected                          | The receiver is off hook.                                                      |
+| 🎵 On hold                            | Pending calls, with animated dots and at most five 📞 handsets plus `+N`.      |
+| ☎️ Call Waiting                       | An incoming message has not been picked up, whether the agent is busy or idle. |
+| ☎️ Hung Up                            | The endpoint has stopped; its recent conversation peers should be notified.    |
+| “This number is no longer in service” | A confirmed past endpoint is gone.                                             |
 
 An unknown destination must remain distinct from a confirmed past endpoint.
 Telephone-announcement wording is desired; **“☎️ Your call cannot be completed
@@ -62,7 +62,7 @@ as dialed.”** is proposed wording, not a settled string.
 
 ### Callback
 
-**“*️⃣6️⃣9️⃣ Call back”** replies to the sender of the most recently **picked-up**
+**“\*️⃣6️⃣9️⃣ Call back”** replies to the sender of the most recently **picked-up**
 incoming message, not the most recent arrival. Preserve that sender's identity.
 If the endpoint has gone, allow unambiguous rediscovery of the same conversation;
 if resolution is ambiguous, send nothing and return choices.
