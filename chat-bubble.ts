@@ -1,5 +1,6 @@
 import {
   type Component,
+  hyperlink,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
@@ -17,13 +18,18 @@ export interface ChatIdentity {
   pid: number;
 }
 
+/** The name a dial label shows for a session. */
+export function dialName(identity: Pick<ChatIdentity, "sessionName">): string {
+  return identity.sessionName?.trim() || "unnamed session";
+}
+
 export function renderDialLabel(
   identity: ChatIdentity,
   expanded: boolean,
   marker = "📞",
 ): string {
   const icon = marker;
-  const name = identity.sessionName?.trim() || "unnamed session";
+  const name = dialName(identity);
   return expanded
     ? `${icon} ${name} (${identity.sessionId}, pid ${identity.pid})`
     : `${icon} ${name}`;
@@ -72,8 +78,26 @@ function align(line: string, width: number, direction: ChatDirection): string {
   return `${" ".repeat(Math.max(0, width - visibleWidth(line)))}${line}`;
 }
 
+/**
+ * Part of a label to render as an OSC 8 hyperlink. The URL is written to the
+ * terminal as given, so it must already be free of control characters.
+ */
+export interface LabelLink {
+  text: string;
+  url: string;
+}
+
+// Links the first occurrence of the link text; a label without it is unchanged.
+function linkLabel(label: string, link: LabelLink | undefined): string {
+  const text = link ? stripTerminalSequences(link.text) : "";
+  const start = text ? label.indexOf(text) : -1;
+  if (!link || start < 0) return label;
+  return `${label.slice(0, start)}${hyperlink(text, link.url)}${label.slice(start + text.length)}`;
+}
+
 type ChatBubbleOptions = {
   label: string;
+  labelLink?: LabelLink;
   body: string;
   styleLabel?: (text: string) => string;
 } & (
@@ -134,7 +158,10 @@ export class ChatBubble implements Component {
     const actualContentWidth = Math.max(1, ...bodyLines.map(visibleWidth));
     const actualBubbleWidth = Math.min(safeWidth, actualContentWidth + 4);
     const labelLines = wrapTextWithAnsi(
-      stripTerminalSequences(this.options.label),
+      linkLabel(
+        stripTerminalSequences(this.options.label),
+        this.options.labelLink,
+      ),
       Math.min(safeWidth, measure),
     ).map((line) => this.options.styleLabel?.(line) ?? line);
     const top = paintFill(`▗${"▄".repeat(actualBubbleWidth - 2)}▖`);

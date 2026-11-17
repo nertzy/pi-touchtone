@@ -4,6 +4,19 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added hyperlinked session names on terminals that support OSC 8: bubbles, the
+  expanded Phonebook, Party Line results, and `spawned by` annotations link a
+  name to the session's cmux surface, or to the `link` launch value it
+  advertises through `PI_TOUCHTONE_METADATA`. Model-facing text is unchanged.
+
+### Fixed
+
+- Fixed session names that contain terminal escape sequences reaching the
+  terminal unfiltered in the expanded Phonebook, Party Line results, and
+  `spawned by` annotations. They are now stripped there, as bubbles already did.
+
 ## [0.4.0] - 2026-10-28
 
 ### Added
