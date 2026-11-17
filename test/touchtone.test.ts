@@ -3438,7 +3438,7 @@ test("a bubble links only the named part of its label and still strips escapes",
   const bubble = new ChatBubble({
     direction: "outgoing",
     label: `📞 Alice ${ESC}[31m(alice-id, pid 7)`,
-    labelLink: { text: "Alice", url: CMUX_LINK },
+    labelLink: { text: "Alice", url: CMUX_LINK, start: 3 },
     body: "Hello",
   });
   const lines = bubble.render(80);
@@ -3455,7 +3455,11 @@ test("a bubble links only the named part of its label and still strips escapes",
   const wrapped = new ChatBubble({
     direction: "incoming",
     label: "📞 Alice Wonderland Longname",
-    labelLink: { text: "Alice Wonderland Longname", url: CMUX_LINK },
+    labelLink: {
+      text: "Alice Wonderland Longname",
+      url: CMUX_LINK,
+      start: 3,
+    },
     body: "Hello",
     theme: {
       getFgAnsi: () => `${ESC}[39m`,
@@ -3471,10 +3475,74 @@ test("a bubble links only the named part of its label and still strips escapes",
   const absent = new ChatBubble({
     direction: "outgoing",
     label: "📞 Bob",
-    labelLink: { text: "Alice", url: CMUX_LINK },
+    labelLink: { text: "Alice", url: CMUX_LINK, start: 3 },
     body: "Hello",
   }).render(80);
   assert.equal(absent[0].trimStart(), "📞 Bob");
+});
+
+test("a bubble links the name, not a marker the name repeats", async (t) => {
+  for (const [label, text, linked] of [
+    ["📞 📞", "📞", `📞 ${osc8("📞", CMUX_LINK)}`],
+    ["📞 📞 📞", "📞 📞", `📞 ${osc8("📞 📞", CMUX_LINK)}`],
+    ["📣 📣 (id, pid 7)", "📣", `📣 ${osc8("📣", CMUX_LINK)} (id, pid 7)`],
+    ["📞 a a", "a", `📞 ${osc8("a", CMUX_LINK)} a`],
+  ]) {
+    const lines = new ChatBubble({
+      direction: "outgoing",
+      label,
+      labelLink: { text, url: CMUX_LINK, start: 3 },
+      body: "Hello",
+    }).render(80);
+    assert.equal(lines[0].trimStart(), linked, label);
+  }
+
+  for (const [variable, value] of [
+    ["CMUX_WORKSPACE_ID", CMUX_WORKSPACE],
+    ["CMUX_SURFACE_ID", CMUX_SURFACE],
+  ])
+    process.env[variable] = value;
+  const root = temporaryRoot();
+  const phone = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "📞", root);
+  const horn = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "📣", root);
+  t.after(async () => {
+    await phone.event("session_shutdown");
+    await horn.event("session_shutdown");
+  });
+  await phone.event("session_start");
+  await horn.event("session_start");
+  setHyperlinks(true);
+
+  const send = {
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Meet on the roof",
+  };
+  const sent = await phone.tool(send);
+  await waitFor(() => horn.delivered.length === 1);
+  await horn.tool({
+    action: "broadcast",
+    selectors: ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+    message: "standup in 5",
+  });
+  await waitFor(() => phone.delivered.length === 1);
+
+  for (const expanded of [false, true]) {
+    const direct = horn
+      .renderIncoming(horn.delivered[0].message, expanded)
+      ?.render(100);
+    const broadcast = phone
+      .renderIncoming(phone.delivered[0].message, expanded)
+      ?.render(100);
+    const outgoing = phone.renderToolResult(sent, send, expanded).render(100);
+    assert.ok(direct);
+    assert.ok(broadcast);
+    assert.ok(direct[0].startsWith(`📞 ${osc8("📞", CMUX_LINK)}`));
+    assert.ok(broadcast[0].startsWith(`📣 ${osc8("📣", CMUX_LINK)}`));
+    assert.ok(
+      outgoing[0].trimStart().startsWith(`📞 ${osc8("📣", CMUX_LINK)}`),
+    );
+  }
 });
 
 test("bubbles link the other session's name when the terminal supports hyperlinks", async (t) => {

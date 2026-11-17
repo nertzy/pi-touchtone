@@ -18,21 +18,23 @@ export interface ChatIdentity {
   pid: number;
 }
 
-/** The name a dial label shows for a session. */
-export function dialName(identity: Pick<ChatIdentity, "sessionName">): string {
+// The name a dial label shows for a session.
+function dialName(identity: Pick<ChatIdentity, "sessionName">): string {
   return identity.sessionName?.trim() || "unnamed session";
 }
+
+// A dial label opens with its marker, then the name.
+const dialPrefix = (marker: string): string => `${marker} `;
 
 export function renderDialLabel(
   identity: ChatIdentity,
   expanded: boolean,
   marker = "📞",
 ): string {
-  const icon = marker;
-  const name = dialName(identity);
+  const name = `${dialPrefix(marker)}${dialName(identity)}`;
   return expanded
-    ? `${icon} ${name} (${identity.sessionId}, pid ${identity.pid})`
-    : `${icon} ${name}`;
+    ? `${name} (${identity.sessionId}, pid ${identity.pid})`
+    : name;
 }
 
 interface ChatBubbleTheme {
@@ -85,13 +87,24 @@ function align(line: string, width: number, direction: ChatDirection): string {
 export interface LabelLink {
   text: string;
   url: string;
+  /** Where the text starts in the label, so a marker it repeats is not linked. */
+  start: number;
 }
 
-// Links the first occurrence of the link text; a label without it is unchanged.
+/** The link for the name in the dial label rendered with the same marker. */
+export function dialLabelLink(
+  identity: Pick<ChatIdentity, "sessionName">,
+  url: string,
+  marker = "📞",
+): LabelLink {
+  return { text: dialName(identity), url, start: dialPrefix(marker).length };
+}
+
+// Links the text where the link says it starts; a label without it there is unchanged.
 function linkLabel(label: string, link: LabelLink | undefined): string {
   const text = link ? stripTerminalSequences(link.text) : "";
-  const start = text ? label.indexOf(text) : -1;
-  if (!link || start < 0) return label;
+  if (!link || !text || !label.startsWith(text, link.start)) return label;
+  const { start } = link;
   return `${label.slice(0, start)}${hyperlink(text, link.url)}${label.slice(start + text.length)}`;
 }
 

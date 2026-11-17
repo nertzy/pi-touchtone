@@ -4,6 +4,11 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the link on a bubble's label landing on the 📞 or 📣 marker instead of
+  the session name when a session is named after that marker.
+
 ## [0.5.0] - 2026-11-16
 
 ### Added
