@@ -4,6 +4,8 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
 ### Added
 
 - Added hyperlinked session names on terminals that support OSC 8: bubbles, the
