@@ -4,6 +4,8 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-16
+
 ### Fixed
 
 - Fixed the link on a bubble's label landing on the 📞 or 📣 marker instead of
