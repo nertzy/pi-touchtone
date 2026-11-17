@@ -24,7 +24,7 @@ import { type Static, Type } from "typebox";
 
 import {
   ChatBubble,
-  dialName,
+  dialLabelLink,
   type LabelLink,
   OnDeckIndicator,
   renderDialLabel,
@@ -181,14 +181,23 @@ function linkedName(session: TouchtoneSession, name: string): string {
   return url ? hyperlink(text, url) : text;
 }
 
-function dialLink(session: TouchtoneSession): LabelLink | undefined {
+function dialLink(
+  session: TouchtoneSession,
+  marker?: string,
+): LabelLink | undefined {
   const url = displayLink(session);
-  return url ? { text: dialName(session), url } : undefined;
+  return url ? dialLabelLink(session, url, marker) : undefined;
+}
+
+/** A parent's name and where it runs, recorded with a `spawned by` annotation. */
+interface ParentLink {
+  text: string;
+  url: string;
 }
 
 // The parent's link was recorded with the annotation, possibly in an earlier
 // run, so it is checked again before it reaches the terminal.
-function linkParent(recorded: string, parent: LabelLink | undefined): string {
+function linkParent(recorded: string, parent: ParentLink | undefined): string {
   const annotation = stripTerminalSequences(recorded);
   if (!parent || !isLink(parent.url) || !getCapabilities().hyperlinks)
     return annotation;
@@ -912,7 +921,7 @@ interface TouchtoneDetails {
   sessions?: TouchtoneSession[];
   entries?: PhonebookEntry[];
   parentAnnotations?: Record<string, string>;
-  parentLinks?: Record<string, LabelLink>;
+  parentLinks?: Record<string, ParentLink>;
   recipient?: TouchtoneSession;
   messageId?: string;
   broadcast?: BroadcastDetails;
@@ -941,7 +950,7 @@ function rosterTable(
   styleHeader: (text: string) => string,
   styleDivider: (text: string) => string,
   parentAnnotations?: Record<string, string>,
-  parentLinks?: Record<string, LabelLink>,
+  parentLinks?: Record<string, ParentLink>,
 ): Component {
   return {
     invalidate() {},
@@ -1236,15 +1245,16 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         if (!messages) return undefined;
         const stack = new Container();
         for (const entry of messages) {
+          const marker = entry.broadcastId ? "📣" : "📞";
           stack.addChild(
             new ChatBubble({
               direction: "incoming",
               label: renderDialLabel(
                 entry.sender,
                 renderOptions.expanded,
-                entry.broadcastId ? "📣" : "📞",
+                marker,
               ),
-              labelLink: dialLink(entry.sender),
+              labelLink: dialLink(entry.sender, marker),
               body: entry.message,
               theme,
               styleLabel: (text) => theme.fg("customMessageLabel", text),
@@ -1516,7 +1526,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           }
           const sessions = matched.map(({ session }) => session);
           const parentAnnotations: Record<string, string> = Object.create(null);
-          const parentLinks: Record<string, LabelLink> = Object.create(null);
+          const parentLinks: Record<string, ParentLink> = Object.create(null);
           for (const session of sessions) {
             if (!session.parentSessionId) continue;
             const parent = byId.get(session.parentSessionId);
