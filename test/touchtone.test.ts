@@ -8,6 +8,9 @@ import { afterEach, beforeEach, test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  getCapabilities,
+  resetCapabilitiesCache,
+  setCapabilities,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
@@ -23,6 +26,7 @@ import {
   launchMetadata,
   ON_DECK_EVENT,
   resolveStoreRoot,
+  sessionLink,
   type TouchtoneMessage,
   type TouchtoneSession,
   TouchtoneStore,
@@ -186,7 +190,15 @@ beforeEach(() => {
   for (const key of environmentVariables) delete process.env[key];
   savedSlot = Object.getOwnPropertyDescriptor(globalThis, launchSlot);
   delete globals[launchSlot];
+  // Rendering must not depend on the terminal running the suite: links are
+  // off unless a test turns them on.
+  setHyperlinks(false);
 });
+
+function setHyperlinks(hyperlinks: boolean): void {
+  resetCapabilitiesCache();
+  setCapabilities({ ...getCapabilities(), hyperlinks });
+}
 
 // Terminal escape sequences require the ESC control character, which Biome's
 // noControlCharactersInRegex flags inside regex literals. Building the pattern
@@ -201,6 +213,7 @@ afterEach(() => {
   }
   delete globals[launchSlot];
   if (savedSlot) Object.defineProperty(globalThis, launchSlot, savedSlot);
+  resetCapabilitiesCache();
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true });
 });
@@ -3355,3 +3368,420 @@ for (const raw of ["{broken", "null"]) {
     }
   });
 }
+
+const CMUX_WORKSPACE = "E6AB18E7-524E-40D7-ACF4-D2B7552B9A54";
+const CMUX_SURFACE = "fabc2a67-cf2f-4562-a1f9-e42118a16676";
+const CMUX_LINK = `cmux://workspace/${CMUX_WORKSPACE}/surface/${CMUX_SURFACE}`;
+const cmuxHandles = {
+  "cmux.workspace": CMUX_WORKSPACE,
+  "cmux.surface": CMUX_SURFACE,
+};
+const osc8 = (text: string, url: string): string =>
+  `${ESC}]8;;${url}${ESC}\\${text}${ESC}]8;;${ESC}\\`;
+
+test("sessionLink builds a cmux link only from UUID workspace and surface handles", () => {
+  assert.equal(sessionLink({ handles: cmuxHandles }), CMUX_LINK);
+  const unlinked: Array<Record<string, string> | undefined> = [
+    undefined,
+    {},
+    { "cmux.workspace": CMUX_WORKSPACE },
+    { "cmux.surface": CMUX_SURFACE },
+    { "cmux.workspace": "workspace-1", "cmux.surface": CMUX_SURFACE },
+    { "cmux.workspace": CMUX_WORKSPACE, "cmux.surface": "surface/../2" },
+    { "cmux.workspace": CMUX_WORKSPACE, "cmux.panel": CMUX_SURFACE },
+    { "herdr.workspace": "wE", "herdr.tab": "wE:t2", "herdr.pane": "wE:p2" },
+    { "tmux.pane": "%3" },
+  ];
+  for (const handles of unlinked) {
+    assert.equal(sessionLink({ handles }), undefined, JSON.stringify(handles));
+  }
+});
+
+test("sessionLink prefers a valid advertised link and ignores an unsafe one", () => {
+  for (const link of [
+    "herdr://pane/wE:p2",
+    "https://example.test/sessions/1?tab=2#top",
+    "x-app+v1.2://focus/a;b",
+  ]) {
+    assert.equal(sessionLink({ handles: cmuxHandles, launch: { link } }), link);
+    assert.equal(sessionLink({ launch: { link } }), link);
+  }
+  for (const link of [
+    "",
+    "no-scheme",
+    "javascript:alert(1)",
+    "mailto:someone@example.test",
+    "//example.test/path",
+    "1bad://example.test",
+    "https://",
+    "https://example.test/a b",
+    `https://example.test/${ESC}]8;;https://evil.test${ESC}\\`,
+    "https://example.test/\x07",
+    "https://example.test/\n",
+    "https://example.test/é",
+    `https://example.test/${"a".repeat(2048)}`,
+  ]) {
+    assert.equal(
+      sessionLink({ handles: cmuxHandles, launch: { link } }),
+      CMUX_LINK,
+      JSON.stringify(link),
+    );
+    assert.equal(
+      sessionLink({ launch: { link } }),
+      undefined,
+      JSON.stringify(link),
+    );
+  }
+});
+
+test("a bubble links only the named part of its label and still strips escapes", () => {
+  const bubble = new ChatBubble({
+    direction: "outgoing",
+    label: `📞 Alice ${ESC}[31m(alice-id, pid 7)`,
+    labelLink: { text: "Alice", url: CMUX_LINK },
+    body: "Hello",
+  });
+  const lines = bubble.render(80);
+  assert.equal(
+    lines[0].trimStart(),
+    `📞 ${osc8("Alice", CMUX_LINK)} (alice-id, pid 7)`,
+  );
+  assert.equal(visibleWidth(lines[0]), 80);
+  assert.equal(
+    stripTerminalSequences(lines[0]).trimStart(),
+    "📞 Alice (alice-id, pid 7)",
+  );
+
+  const wrapped = new ChatBubble({
+    direction: "incoming",
+    label: "📞 Alice Wonderland Longname",
+    labelLink: { text: "Alice Wonderland Longname", url: CMUX_LINK },
+    body: "Hello",
+    theme: {
+      getFgAnsi: () => `${ESC}[39m`,
+      getBgAnsi: () => `${ESC}[49m`,
+    },
+  }).render(12);
+  assert.deepEqual(wrapped.slice(0, 3), [
+    `📞 ${osc8("Alice", CMUX_LINK)}`,
+    osc8("Wonderland", CMUX_LINK),
+    osc8("Longname", CMUX_LINK),
+  ]);
+
+  const absent = new ChatBubble({
+    direction: "outgoing",
+    label: "📞 Bob",
+    labelLink: { text: "Alice", url: CMUX_LINK },
+    body: "Hello",
+  }).render(80);
+  assert.equal(absent[0].trimStart(), "📞 Bob");
+});
+
+test("bubbles link the other session's name when the terminal supports hyperlinks", async (t) => {
+  for (const [variable, value] of [
+    ["CMUX_WORKSPACE_ID", CMUX_WORKSPACE],
+    ["CMUX_SURFACE_ID", CMUX_SURFACE],
+  ])
+    process.env[variable] = value;
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  const args = {
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Meet on the roof",
+  };
+  const result = await alice.tool(args);
+  await waitFor(() => bob.delivered.length === 1);
+  const delivered = bob.delivered[0].message;
+
+  // The model reads plain text whatever the terminal supports.
+  setHyperlinks(true);
+  assert.doesNotMatch(result.content[0].text, ansi(""));
+  assert.doesNotMatch(delivered.content, ansi(""));
+
+  for (const expanded of [false, true]) {
+    setHyperlinks(true);
+    const incoming = bob.renderIncoming(delivered, expanded)?.render(100);
+    const outgoing = alice.renderToolResult(result, args, expanded).render(100);
+    assert.ok(incoming);
+    assert.ok(incoming[0].startsWith(`📞 ${osc8("Alice", CMUX_LINK)}`));
+    assert.ok(
+      outgoing[0].trimStart().startsWith(`📞 ${osc8("Bob", CMUX_LINK)}`),
+    );
+    assert.ok(outgoing.every((line) => visibleWidth(line) <= 100));
+
+    setHyperlinks(false);
+    const plainIncoming = bob.renderIncoming(delivered, expanded)?.render(100);
+    const plainOutgoing = alice
+      .renderToolResult(result, args, expanded)
+      .render(100);
+    assert.ok(plainIncoming);
+    assert.doesNotMatch(plainIncoming.join("\n"), ansi("\\]8;"));
+    assert.doesNotMatch(plainOutgoing.join("\n"), ansi("\\]8;"));
+    assert.deepEqual(
+      plainIncoming.map(stripTerminalSequences),
+      incoming.map(stripTerminalSequences),
+    );
+    assert.deepEqual(
+      plainOutgoing.map(stripTerminalSequences),
+      outgoing.map(stripTerminalSequences),
+    );
+  }
+});
+
+test("a session without a link target keeps a plain name on a hyperlink terminal", async (t) => {
+  process.env.HERDR_PANE_ID = "wE:p2";
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "Hello",
+  });
+  await waitFor(() => bob.delivered.length === 1);
+  setHyperlinks(true);
+  const incoming = bob.renderIncoming(bob.delivered[0].message)?.render(100);
+  assert.ok(incoming);
+  assert.doesNotMatch(incoming.join("\n"), ansi("\\]8;"));
+});
+
+test("a launcher-advertised link is the name's target and stays dialable", async (t) => {
+  const link = "herdr://pane/wE:p2";
+  process.env.PI_TOUCHTONE_METADATA = JSON.stringify({ link });
+  process.env.CMUX_WORKSPACE_ID = CMUX_WORKSPACE;
+  process.env.CMUX_SURFACE_ID = CMUX_SURFACE;
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  const result = await alice.tool({ action: "list", to: link });
+  const { sessions } = result.details as { sessions: TouchtoneSession[] };
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].launch?.link, link);
+  assert.doesNotMatch(result.content[0].text, ansi(""));
+  setHyperlinks(true);
+  const expanded = alice
+    .renderToolResult(result, { action: "list" }, true)
+    .render(160)
+    .join("\n");
+  assert.ok(expanded.includes(osc8("Alice", link)));
+  assert.ok(!expanded.includes(CMUX_LINK));
+});
+
+test("the phonebook and broadcast results link names within their widths", () => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const parentLink = "herdr://pane/wP:p1";
+  const sessions = [
+    rosterSession("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", {
+      sessionName: "Bob Longname Wraps Twice",
+      handles: cmuxHandles,
+      parentSessionId: "parent-id",
+    }),
+    rosterSession("cccccccc-cccc-cccc-cccc-cccccccccccc", {
+      sessionName: undefined,
+      handles: cmuxHandles,
+    }),
+    rosterSession("dddddddd-dddd-dddd-dddd-dddddddddddd", {
+      sessionName: "Dan",
+    }),
+  ];
+  const list = {
+    content: [{ type: "text", text: "roster" }],
+    details: {
+      sessions,
+      parentAnnotations: {
+        [sessions[0].sessionId]: "spawned by spawner (parent-id)",
+      },
+      parentLinks: {
+        [sessions[0].sessionId]: { text: "spawner", url: parentLink },
+      },
+    },
+  };
+  const roster = alice.renderToolResult(list, { action: "list" }, true);
+
+  setHyperlinks(false);
+  const plain = roster.render(160);
+  assert.doesNotMatch(plain.join("\n"), ansi("\\]8;"));
+
+  setHyperlinks(true);
+  const linked = roster.render(160);
+  assert.deepEqual(linked.map(stripTerminalSequences), plain);
+  const joined = linked.join("\n");
+  // A wrapped name is linked on every line, and cell padding stays outside.
+  for (const part of ["Bob Longname", "Wraps Twice", "(unnamed", "session)"])
+    assert.ok(joined.includes(`  ${osc8(part, CMUX_LINK)} `), part);
+  assert.match(joined, / {2}Dan {2}/);
+  assert.ok(
+    linked.includes(`spawned by ${osc8("spawner", parentLink)} (parent-id)`),
+  );
+  for (let width = 60; width <= 160; width += 1) {
+    assert.ok(
+      roster.render(width).every((line) => visibleWidth(line) <= width),
+      `linked roster exceeded width ${width}`,
+    );
+  }
+  // No recorded link, a link for another name, and an unsafe link stay plain.
+  for (const parentLinks of [
+    undefined,
+    { [sessions[0].sessionId]: { text: "someone", url: parentLink } },
+    {
+      [sessions[0].sessionId]: {
+        text: "spawner",
+        url: `${parentLink}${ESC}]8;;https://evil.test${ESC}\\`,
+      },
+    },
+  ]) {
+    const lines = alice
+      .renderToolResult(
+        { ...list, details: { ...list.details, parentLinks } },
+        { action: "list" },
+        true,
+      )
+      .render(160);
+    assert.ok(lines.includes("spawned by spawner (parent-id)"));
+    assert.ok(!lines.join("\n").includes("://pane"));
+  }
+
+  const broadcast = (): string =>
+    alice
+      .renderToolResult(
+        {
+          content: [{ type: "text", text: "broadcast sent" }],
+          details: {
+            broadcast: {
+              broadcastId: "broadcast-1",
+              recipients: sessions,
+              matchedBy: { "E-123": 3 },
+              delivered: 3,
+            },
+          },
+        },
+        { action: "broadcast", message: "Hello group" },
+      )
+      .render(120)
+      .join("\n");
+  const linkedBroadcast = broadcast();
+  assert.ok(
+    linkedBroadcast.includes(
+      `${osc8("Bob Longname Wraps Twice", CMUX_LINK)} (bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb)`,
+    ),
+  );
+  assert.ok(linkedBroadcast.includes(osc8("unnamed session", CMUX_LINK)));
+  assert.match(linkedBroadcast, / Dan \(dddddddd/);
+  setHyperlinks(false);
+  const plainBroadcast = broadcast();
+  assert.doesNotMatch(plainBroadcast, ansi("\\]8;"));
+  assert.equal(
+    stripTerminalSequences(plainBroadcast),
+    stripTerminalSequences(linkedBroadcast),
+  );
+});
+
+test("a session name cannot smuggle its own link into the roster or a broadcast", () => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const smuggled = `nice${ESC}]8;;https://evil.test/${ESC}\\name`;
+  const child = rosterSession("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", {
+    sessionName: smuggled,
+    handles: cmuxHandles,
+    parentSessionId: "parent-id",
+  });
+  const list = {
+    content: [{ type: "text", text: "roster" }],
+    details: {
+      sessions: [child],
+      parentAnnotations: {
+        [child.sessionId]: `spawned by ${smuggled} (parent-id)`,
+      },
+      parentLinks: { [child.sessionId]: { text: smuggled, url: CMUX_LINK } },
+    },
+  };
+  const broadcast = {
+    content: [{ type: "text", text: "broadcast sent" }],
+    details: {
+      broadcast: {
+        broadcastId: "broadcast-1",
+        recipients: [child],
+        matchedBy: { "E-123": 1 },
+        delivered: 1,
+      },
+    },
+  };
+  const render = (): string =>
+    [
+      ...alice.renderToolResult(list, { action: "list" }, true).render(160),
+      ...alice
+        .renderToolResult(broadcast, { action: "broadcast", message: "Hi" })
+        .render(120),
+    ].join("\n");
+
+  setHyperlinks(true);
+  const linked = render();
+  assert.ok(!linked.includes("evil.test"));
+  assert.ok(linked.includes(`  ${osc8("nicename", CMUX_LINK)} `));
+  assert.ok(linked.includes(`spawned by ${osc8("nicename", CMUX_LINK)} (`));
+  assert.ok(linked.includes(`${osc8("nicename", CMUX_LINK)} (bbbbbbbb`));
+
+  setHyperlinks(false);
+  const plain = render();
+  assert.doesNotMatch(plain, ansi("\\]8;"));
+  assert.ok(plain.includes("spawned by nicename (parent-id)"));
+});
+
+test("list records a link for a live named parent that has a target", async (t) => {
+  process.env.CMUX_WORKSPACE_ID = CMUX_WORKSPACE;
+  process.env.CMUX_SURFACE_ID = CMUX_SURFACE;
+  const root = temporaryRoot();
+  const parent = harness(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "Parent",
+    root,
+  );
+  t.after(async () => {
+    await parent.event("session_shutdown");
+  });
+  await parent.event("session_start");
+  const store = new TouchtoneStore({ root });
+  const child = rosterSession("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", {
+    sessionName: "Child",
+    parentSessionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  });
+  const orphan = rosterSession("cccccccc-cccc-cccc-cccc-cccccccccccc", {
+    sessionName: "Orphan",
+    parentSessionId: "gone",
+  });
+  store.register(child);
+  store.register(orphan);
+  const result = await parent.tool({ action: "list", to: "Child" });
+  assert.deepEqual(
+    { ...(result.details as { parentLinks: object }).parentLinks },
+    { [child.sessionId]: { text: "Parent", url: CMUX_LINK } },
+  );
+  assert.doesNotMatch(result.content[0].text, ansi(""));
+  setHyperlinks(true);
+  const lines = parent
+    .renderToolResult(result, { action: "list" }, true)
+    .render(160);
+  assert.ok(
+    lines.includes(
+      `spawned by ${osc8("Parent", CMUX_LINK)} (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa)`,
+    ),
+  );
+});

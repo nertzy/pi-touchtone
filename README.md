@@ -99,6 +99,33 @@ only within a terminal instance or server, not across all running terminals.
 Adding a prefix would not fix collisions between two instances of the same
 terminal: both could advertise `kitty:1`.
 
+### Linked session names
+
+Where your terminal supports OSC 8 hyperlinks, Touchtone links a session's name
+to the place that session runs, so you can jump there from a message:
+
+- the sender's name on an incoming bubble and the recipient's on a sent one,
+- the NAME column of the expanded Phonebook,
+- recipient names in a Party Line result, and
+- the parent's name in a `spawned by` annotation.
+
+The link target is the first of these the session offers:
+
+1. The `link` launch value it was started with (see
+   [Launching child sessions](#launching-child-sessions)).
+2. For a session in cmux, `cmux://workspace/<workspace>/surface/<surface>`,
+   built from its `cmux.workspace` and `cmux.surface` handles when both are
+   UUIDs.
+
+A session that offers neither keeps a plain name. So does every name on a
+terminal that pi does not detect as hyperlink-capable; set `PI_HYPERLINKS=1` to
+override that detection. Links are for people only: model-facing text never
+contains them.
+
+A child process inherits its parent's terminal handles, so in cmux its name
+links to the surface it was launched from. A `link` launch value is not
+inherited: a child has one only when its launcher passes one.
+
 ## 📞 Dialing out / send
 
 Copy the recipient's session ID from the Phonebook — or use any advertised
@@ -188,6 +215,13 @@ PI_TOUCHTONE_METADATA='{"agent":"reviewer","runId":"review-42","parentSessionId"
 The caller must replace `parent-a` with the actual immediate parent's Pi
 session ID. `agent` and `runId` let you dial an agent or broadcast to a run.
 Any other retained string value is also dialable.
+
+A `link` value is also where the session's
+[displayed name links](#linked-session-names). Use it for a terminal Touchtone
+cannot build a link for, or to override the cmux link. It must be a URL with a
+scheme and `//`, at most 2048 characters of printable ASCII with no spaces
+(`https://…`, `cmux://…`, or a scheme your terminal or one of its plugins
+handles); any other value is kept as a selector but never linked.
 
 Touchtone also recognizes these pi-cohort launch inputs:
 

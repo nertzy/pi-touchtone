@@ -11,7 +11,10 @@ import type {
 import {
   type Component,
   Container,
+  getCapabilities,
+  hyperlink,
   Spacer,
+  stripTerminalSequences,
   Text,
   truncateToWidth,
   visibleWidth,
@@ -19,7 +22,13 @@ import {
 } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
-import { ChatBubble, OnDeckIndicator, renderDialLabel } from "./chat-bubble.ts";
+import {
+  ChatBubble,
+  dialName,
+  type LabelLink,
+  OnDeckIndicator,
+  renderDialLabel,
+} from "./chat-bubble.ts";
 
 const DEFAULT_ROOT = path.join(
   os.homedir(),
@@ -120,6 +129,73 @@ export function launchMetadata(env: NodeJS.ProcessEnv, ownSessionId: string) {
         ? undefined
         : metadata.parentSessionId,
   };
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// An advertised link is written into an OSC 8 terminal sequence, so it must
+// name a scheme and hold only printable ASCII: no spaces, control characters,
+// or escapes that could end the sequence early.
+const LINK_RE = /^[a-z][a-z0-9+.-]*:\/\/[\x21-\x7e]+$/i;
+const MAX_LINK_LENGTH = 2048;
+const SPAWNED_BY = "spawned by ";
+
+function isLink(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_LINK_LENGTH &&
+    LINK_RE.test(value)
+  );
+}
+
+/**
+ * Where a session's displayed name links to: the `link` launch value it
+ * advertises for itself, or else its cmux surface. Undefined when the session
+ * offers neither, which leaves its name as plain text.
+ */
+export function sessionLink(
+  session: Pick<TouchtoneSession, "handles" | "launch">,
+): string | undefined {
+  const advertised = session.launch?.link;
+  if (isLink(advertised)) return advertised;
+  const workspace = session.handles?.["cmux.workspace"];
+  const surface = session.handles?.["cmux.surface"];
+  if (workspace && surface && UUID_RE.test(workspace) && UUID_RE.test(surface))
+    return `cmux://workspace/${workspace}/surface/${surface}`;
+  return undefined;
+}
+
+// Links are for people: only human-facing renderers call these, and only a
+// terminal that reports OSC 8 support gets one.
+function displayLink(
+  session: Pick<TouchtoneSession, "handles" | "launch">,
+): string | undefined {
+  return getCapabilities().hyperlinks ? sessionLink(session) : undefined;
+}
+
+// A name is whatever its session chose, so it is stripped of terminal
+// sequences before display: left in, it could carry a link of its own.
+function linkedName(session: TouchtoneSession, name: string): string {
+  const text = stripTerminalSequences(name);
+  const url = displayLink(session);
+  return url ? hyperlink(text, url) : text;
+}
+
+function dialLink(session: TouchtoneSession): LabelLink | undefined {
+  const url = displayLink(session);
+  return url ? { text: dialName(session), url } : undefined;
+}
+
+// The parent's link was recorded with the annotation, possibly in an earlier
+// run, so it is checked again before it reaches the terminal.
+function linkParent(recorded: string, parent: LabelLink | undefined): string {
+  const annotation = stripTerminalSequences(recorded);
+  if (!parent || !isLink(parent.url) || !getCapabilities().hyperlinks)
+    return annotation;
+  const name = stripTerminalSequences(parent.text);
+  const named = `${SPAWNED_BY}${name}`;
+  if (!name || !annotation.startsWith(named)) return annotation;
+  return `${SPAWNED_BY}${hyperlink(name, parent.url)}${annotation.slice(named.length)}`;
 }
 
 function isAbsolutePath(value: string | undefined): value is string {
@@ -836,6 +912,7 @@ interface TouchtoneDetails {
   sessions?: TouchtoneSession[];
   entries?: PhonebookEntry[];
   parentAnnotations?: Record<string, string>;
+  parentLinks?: Record<string, LabelLink>;
   recipient?: TouchtoneSession;
   messageId?: string;
   broadcast?: BroadcastDetails;
@@ -864,6 +941,7 @@ function rosterTable(
   styleHeader: (text: string) => string,
   styleDivider: (text: string) => string,
   parentAnnotations?: Record<string, string>,
+  parentLinks?: Record<string, LabelLink>,
 ): Component {
   return {
     invalidate() {},
@@ -915,14 +993,23 @@ function rosterTable(
         lines.push(
           ...renderRow([
             session.sessionId,
-            session.sessionName?.trim() || "(unnamed session)",
+            linkedName(
+              session,
+              session.sessionName?.trim() || "(unnamed session)",
+            ),
             String(session.pid),
             session.cwd,
             rosterHandles(session),
           ]),
         );
         const annotation = parentAnnotations?.[session.sessionId];
-        if (annotation) lines.push(...wrapToWidth(annotation, safeWidth));
+        if (annotation)
+          lines.push(
+            ...wrapToWidth(
+              linkParent(annotation, parentLinks?.[session.sessionId]),
+              safeWidth,
+            ),
+          );
       }
       return lines;
     },
@@ -1157,6 +1244,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
                 renderOptions.expanded,
                 entry.broadcastId ? "📣" : "📞",
               ),
+              labelLink: dialLink(entry.sender),
               body: entry.message,
               theme,
               styleLabel: (text) => theme.fg("customMessageLabel", text),
@@ -1317,6 +1405,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             (value) => theme.fg("muted", value),
             (value) => theme.fg("dim", value),
             result.details.parentAnnotations,
+            result.details.parentLinks,
           );
         }
         if (
@@ -1335,7 +1424,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           );
           const recipientLines = outcome.recipients.map((recipient) => {
             const name = recipient.sessionName?.trim() || "unnamed session";
-            return `  ${name} (${recipient.sessionId})`;
+            return `  ${linkedName(recipient, name)} (${recipient.sessionId})`;
           });
           const summary = [
             `Delivered to ${outcome.delivered}/${outcome.recipients.length} sessions${outcome.excludedSelf ? " (self excluded)" : ""}`,
@@ -1378,6 +1467,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               result.details.recipient,
               renderOptions.expanded,
             ),
+            labelLink: dialLink(result.details.recipient),
             body: renderContext.args.message ?? "",
             styleLabel: (label) => theme.fg("toolOutput", label),
           }),
@@ -1426,13 +1516,17 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           }
           const sessions = matched.map(({ session }) => session);
           const parentAnnotations: Record<string, string> = Object.create(null);
+          const parentLinks: Record<string, LabelLink> = Object.create(null);
           for (const session of sessions) {
             if (!session.parentSessionId) continue;
             const parent = byId.get(session.parentSessionId);
             const name = parent?.sessionName?.trim();
             parentAnnotations[session.sessionId] = name
-              ? `spawned by ${name} (${session.parentSessionId})`
-              : `spawned by ${session.parentSessionId}${parent ? "" : " (not live)"}`;
+              ? `${SPAWNED_BY}${name} (${session.parentSessionId})`
+              : `${SPAWNED_BY}${session.parentSessionId}${parent ? "" : " (not live)"}`;
+            const url = parent && name ? sessionLink(parent) : undefined;
+            if (name && url)
+              parentLinks[session.sessionId] = { text: name, url };
           }
           const lines = matched.map(({ session, selectors }) => {
             const name = session.sessionName?.trim() || "(unnamed session)";
@@ -1450,7 +1544,12 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             text += `\nNo live session matched: ${misses.map((locator) => JSON.stringify(locator)).join(", ")} — run list without locators for the full roster.`;
           return {
             content: [{ type: "text" as const, text }],
-            details: { sessions, entries: matched, parentAnnotations },
+            details: {
+              sessions,
+              entries: matched,
+              parentAnnotations,
+              parentLinks,
+            },
           };
         }
 
