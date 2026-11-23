@@ -69,6 +69,10 @@ sessions:
 A locator that matches no live session is named in the result and simply
 filters it out; the full roster is one bare `list` call away.
 
+A session that registered but [stopped listening](#unreachable-sessions) is
+left out of the roster. A bare `list` names each one under a separate "Not
+listening" heading, and the compact result adds their count.
+
 The compact result shows a session count (the Phonebook). Expand it to see exact
 session IDs, names, PIDs, working directories, and available terminal
 handles in a table. At terminal widths below 60 columns, the expanded result
@@ -148,6 +152,36 @@ fails, names what each locator matched, and you should run `list` again.
 Reply with another `send`. Sending returns after writing the message file;
 it does **not** wait for the recipient to read, acknowledge, or answer it.
 There is no `ask` action or reply correlation.
+
+### Unreachable sessions
+
+A message reaches only a session that runs Touchtone and is still listening.
+When a destination is neither, `send` fails, writes nothing, and names the
+cause where it can tell:
+
+- **A pi session without Touchtone.** A session started without the extension
+  (for example with `--no-extensions`) never registers, so it is not in the
+  Phonebook and cannot receive messages. Dialing its PID says so. Touchtone
+  recognizes such a session only by PID: it asks `ps` for the process name,
+  never the command line, and cannot see another process's session ID or
+  name. A process named `pi` or `pi-rpc` is taken for a pi session. Any other
+  name is repeated only when the whole process title is a plain name or a
+  plain executable path.
+- **A session that stopped listening.** Each session refreshes its roster
+  entry every five seconds. An entry that goes 30 seconds without a refresh
+  while its PID is alive means the session crashed and the PID was reused, or
+  the process is suspended or hung. The error names the session and how long
+  it has been silent.
+- **A PID with no process, or another program's PID.** The error says which.
+  Any all-digit locator that matches no session is read as a PID.
+
+`broadcast` skips matching sessions that stopped listening and lists them under
+"Not listening (skipped)". A selector that matches only such sessions counts
+as matching nothing.
+
+Roster entries from Touchtone 0.5.1 and earlier promise no heartbeat. They
+stay live for as long as their PID is alive, so sessions on mixed versions keep
+reaching each other.
 
 ## 📣 Party Line
 
@@ -331,7 +365,10 @@ This affects the indicator, not message delivery.
 Sessions register a small JSON roster entry and watch their own inbox. Atomic
 file writes deliver messages, with a one-second polling fallback to filesystem
 notifications. Entries whose PIDs are no longer alive are pruned when listing.
-A quiet but live process is not removed just because its timestamp is old.
+A session also refreshes its roster entry's modification time every five
+seconds as a heartbeat, on every fifth poll rather than a timer of its own. An entry that promised a heartbeat and has gone 30
+seconds without one is kept on disk but treated as
+[not listening](#unreachable-sessions).
 
 Touchtone resolves one store root when constructed. An explicit `root` option
 wins, followed by an absolute `PI_TOUCHTONE_HOME`, then
@@ -351,7 +388,10 @@ send secrets.
 Messages are removed after being handed to Pi, not after the agent acts on them.
 Delivery is best-effort: a successful send is not a receipt, process crashes
 can lose a handoff or cause duplicate delivery, and PID reuse can make a stale
-session appear live. Malformed inbox files are retained for manual inspection.
+entry from Touchtone 0.5.1 or earlier appear live. A session whose process was
+suspended, or that has not run since the machine woke, can read as not
+listening until its next heartbeat; a send to it fails without writing, so
+retrying is safe. Malformed inbox files are retained for manual inspection.
 
 ## Inspiration and differences
 

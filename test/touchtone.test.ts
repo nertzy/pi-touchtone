@@ -23,6 +23,7 @@ import {
 } from "../chat-bubble.ts";
 import {
   createTouchtoneExtension,
+  HEARTBEAT_MS,
   launchMetadata,
   ON_DECK_EVENT,
   resolveStoreRoot,
@@ -3852,4 +3853,605 @@ test("list records a link for a live named parent that has a target", async (t) 
       `spawned by ${osc8("Parent", CMUX_LINK)} (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa)`,
     ),
   );
+});
+
+const SILENT_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+/** Registers a session that promised a heartbeat and then stopped beating. */
+function registerSilent(
+  store: TouchtoneStore,
+  over: Partial<TouchtoneSession> = {},
+): TouchtoneSession {
+  const session = rosterSession(SILENT_ID, {
+    sessionName: "Carol",
+    heartbeatMs: 1000,
+    ...over,
+  });
+  store.register(session);
+  const longAgo = new Date(Date.now() - 150_000);
+  fs.utimesSync(store.rosterFile(session.sessionId), longAgo, longAgo);
+  return session;
+}
+
+function inboxFiles(store: TouchtoneStore, sessionId: string): string[] {
+  try {
+    return fs.readdirSync(store.inboxDirectory(sessionId));
+  } catch {
+    return [];
+  }
+}
+
+test("phonebook omits a registered session whose heartbeat went silent", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  store.register(rosterSession("alice", { heartbeatMs: 1000 }));
+  const carol = registerSilent(store);
+
+  assert.deepEqual(
+    store.phonebook().map(({ session }) => session.sessionId),
+    ["alice"],
+  );
+  const [silent, ...rest] = store.silentSessions();
+  assert.deepEqual(rest, []);
+  assert.equal(silent.session.sessionId, carol.sessionId);
+  assert.ok(silent.selectors.includes("Carol"));
+  assert.ok(silent.silentMs >= 149_000, String(silent.silentMs));
+  // A silent entry with a live pid is evidence, not garbage.
+  assert.ok(fs.existsSync(store.rosterFile(carol.sessionId)));
+});
+
+for (const [name, heartbeatMs] of [
+  ["absent", undefined],
+  ["zero", 0],
+  ["negative", -5],
+  ["text", "1000"],
+  ["null", null],
+] as const) {
+  test(`a roster entry with ${name} heartbeatMs stays live however old it is`, () => {
+    const root = temporaryRoot();
+    const store = new TouchtoneStore({ root });
+    registerSilent(store, { heartbeatMs: heartbeatMs as never });
+    assert.deepEqual(
+      store.phonebook().map(({ session }) => session.sessionId),
+      [SILENT_ID],
+    );
+    assert.deepEqual(store.silentSessions(), []);
+  });
+}
+
+test("heartbeat refreshes a roster entry and reports a missing one", () => {
+  const root = temporaryRoot();
+  const store = new TouchtoneStore({ root });
+  registerSilent(store);
+  assert.equal(store.heartbeat(SILENT_ID), true);
+  assert.deepEqual(
+    store.phonebook().map(({ session }) => session.sessionId),
+    [SILENT_ID],
+  );
+  fs.unlinkSync(store.rosterFile(SILENT_ID));
+  assert.equal(store.heartbeat(SILENT_ID), false);
+});
+
+test("a heartbeat republishes the entry when its timestamp cannot be set", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "Alice",
+    root,
+    process.pid,
+    (options) => createTouchtoneExtension({ ...options, heartbeatMs: 20 }),
+  );
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  const file = new TouchtoneStore({ root }).rosterFile(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  );
+  const longAgo = new Date(Date.now() - 150_000);
+  fs.utimesSync(file, longAgo, longAgo);
+
+  const originalUtimesSync = fsDefault.utimesSync;
+  fsDefault.utimesSync = () => {
+    throw Object.assign(new Error("utimes not permitted"), { code: "EPERM" });
+  };
+  syncBuiltinESMExports();
+  try {
+    await waitFor(() => Date.now() - fs.statSync(file).mtimeMs < 10_000);
+  } finally {
+    fsDefault.utimesSync = originalUtimesSync;
+    syncBuiltinESMExports();
+  }
+});
+
+test("the heartbeat rides the inbox poll instead of running its own timer", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "Alice",
+    root,
+    process.pid,
+    (options) => createTouchtoneExtension({ ...options, heartbeatMs: 20 }),
+  );
+  t.after(async () => alice.event("session_shutdown"));
+  const timers = t.mock.method(globalThis, "setInterval");
+  await alice.event("session_start");
+  assert.equal(timers.mock.callCount(), 1);
+  timers.mock.restore();
+
+  // The single timer still beats.
+  const file = new TouchtoneStore({ root }).rosterFile(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  );
+  const longAgo = new Date(Date.now() - 150_000);
+  fs.utimesSync(file, longAgo, longAgo);
+  await waitFor(() => Date.now() - fs.statSync(file).mtimeMs < 10_000);
+});
+
+for (const [heartbeatMs, pollMs, promised] of [
+  [50, 20, 60],
+  [5, 20, 20],
+  [5000, 1000, 5000],
+]) {
+  test(`a ${heartbeatMs} ms heartbeat on a ${pollMs} ms poll promises ${promised} ms, a whole number of polls`, async (t) => {
+    const root = temporaryRoot();
+    const alice = harness(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "Alice",
+      root,
+      process.pid,
+      (options) =>
+        createTouchtoneExtension({ ...options, heartbeatMs, pollMs }),
+    );
+    t.after(async () => alice.event("session_shutdown"));
+    await alice.event("session_start");
+    const file = new TouchtoneStore({ root }).rosterFile(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(file, "utf8")).heartbeatMs,
+      promised,
+    );
+  });
+}
+
+for (const invalid of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+  test(`a heartbeatMs option of ${invalid} falls back to the default interval`, async (t) => {
+    const root = temporaryRoot();
+    const alice = harness(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "Alice",
+      root,
+      process.pid,
+      (options) =>
+        createTouchtoneExtension({ ...options, heartbeatMs: invalid }),
+    );
+    t.after(async () => alice.event("session_shutdown"));
+    await alice.event("session_start");
+    const file = new TouchtoneStore({ root }).rosterFile(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(file, "utf8")).heartbeatMs,
+      HEARTBEAT_MS,
+    );
+  });
+}
+
+test("a session promises a heartbeat, keeps its roster entry fresh, and restores a deleted one", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "Alice",
+    root,
+    process.pid,
+    (options) => createTouchtoneExtension({ ...options, heartbeatMs: 20 }),
+  );
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  const store = new TouchtoneStore({ root });
+  const file = store.rosterFile("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).heartbeatMs, 20);
+
+  const longAgo = new Date(Date.now() - 150_000);
+  fs.utimesSync(file, longAgo, longAgo);
+  await waitFor(() => Date.now() - fs.statSync(file).mtimeMs < 10_000);
+
+  fs.unlinkSync(file);
+  await waitFor(() => fs.existsSync(file));
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).heartbeatMs, 20);
+
+  // A rename republishes the entry with the same promise.
+  alice.setSessionName("Alice II");
+  await alice.event("session_info_changed");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).heartbeatMs, 20);
+
+  await alice.event("session_shutdown");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(fs.existsSync(file), false);
+});
+
+test("the sender block of a message carries no heartbeat promise", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  await alice.tool({
+    action: "send",
+    to: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    message: "hello",
+  });
+  await waitFor(() => bob.delivered.length === 1);
+  const [{ sender }] = (
+    bob.delivered[0].message.details as { messages: TouchtoneMessage[] }
+  ).messages;
+  assert.equal("heartbeatMs" in sender, false);
+});
+
+test("send fails without writing when the recipient stopped listening", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  const store = new TouchtoneStore({ root });
+  registerSilent(store);
+
+  for (const to of [SILENT_ID, "Carol"]) {
+    await assert.rejects(
+      alice.tool({ action: "send", to, message: "are you there?" }),
+      (error: unknown) => {
+        const text = error instanceof Error ? error.message : String(error);
+        assert.match(text, /found no live session for/);
+        assert.match(
+          text,
+          /matches cccccccc-cccc-cccc-cccc-cccccccccccc \(Carol\), which is registered but not listening: silent for 2m/,
+        );
+        assert.match(text, /Nothing was sent\./);
+        assert.match(text, /Example of a successful touchtone call:/);
+        assert.doesNotMatch(text, /without the touchtone extension/);
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(inboxFiles(store, SILENT_ID), []);
+});
+
+test("send names the silent session behind an ignored locator", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  const store = new TouchtoneStore({ root });
+  registerSilent(store);
+
+  const result = await alice.tool({
+    action: "send",
+    selectors: ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", SILENT_ID],
+    message: "hello",
+  });
+  assert.match(result.content[0].text, /Message sent to Bob/);
+  assert.match(
+    result.content[0].text,
+    /Ignored locator that matched no live session: "cccccccc-cccc-cccc-cccc-cccccccccccc"\./,
+  );
+  assert.match(
+    result.content[0].text,
+    /registered but not listening: silent for 2m/,
+  );
+  assert.deepEqual(inboxFiles(store, SILENT_ID), []);
+});
+
+test("send to an unknown destination says a session without touchtone is never listed", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  await assert.rejects(
+    alice.tool({
+      action: "send",
+      to: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      message: "hello",
+    }),
+    /found no live session for "dddddddd-dddd-dddd-dddd-dddddddddddd"\. A pi session that runs without the touchtone extension is never listed and cannot receive messages\. Nothing was sent\. Run touchtone list/,
+  );
+});
+
+for (const [name, processName, expected] of [
+  [
+    "a pi session without touchtone",
+    "pi",
+    /Read as a pid, \d+ is a running pi process that has not registered in this touchtone store: it most likely runs without the touchtone extension \(for example, started with --no-extensions\) and cannot receive messages\./,
+  ],
+  [
+    "a pi RPC session without touchtone",
+    "pi-rpc\n",
+    /Read as a pid, \d+ is a running pi process that has not registered in this touchtone store/,
+  ],
+  [
+    "another program",
+    "/usr/local/bin/node",
+    /Read as a pid, \d+ is a running process \(node\) that does not look like a pi session\./,
+  ],
+  [
+    "a process it cannot name",
+    undefined,
+    /Read as a pid, \d+ is a running process that has not registered in this touchtone store; if it is a pi session, it most likely runs without the touchtone extension and cannot receive messages\./,
+  ],
+  [
+    // On macOS `ps -o comm=` reports a title the process chose for itself.
+    "a process whose title is free text",
+    "worker: token=abc /path/with/slash secret",
+    /Read as a pid, \d+ is a running process that has not registered in this touchtone store; if it is a pi session/,
+  ],
+  [
+    "a process whose free-text title ends in a plain path segment",
+    "worker: token=abc /path/secret",
+    /Read as a pid, \d+ is a running process that has not registered in this touchtone store; if it is a pi session/,
+  ],
+  [
+    "a process whose free-text title ends in /pi",
+    "worker: token=abc /opt/pi",
+    /Read as a pid, \d+ is a running process that has not registered in this touchtone store; if it is a pi session/,
+  ],
+  [
+    "a pi session reported by its executable path",
+    "/opt/homebrew/bin/pi",
+    /Read as a pid, \d+ is a running pi process that has not registered in this touchtone store/,
+  ],
+] as const) {
+  test(`send to the pid of ${name} names the cause`, async (t) => {
+    const root = temporaryRoot();
+    const probed: number[] = [];
+    const alice = harness(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "Alice",
+      root,
+      process.pid,
+      (options) =>
+        createTouchtoneExtension({
+          ...options,
+          processName(pid) {
+            probed.push(pid);
+            return processName;
+          },
+        }),
+    );
+    t.after(async () => alice.event("session_shutdown"));
+    await alice.event("session_start");
+    await assert.rejects(
+      alice.tool({
+        action: "send",
+        to: String(process.ppid),
+        message: "hello",
+      }),
+      (error: unknown) => {
+        const text = error instanceof Error ? error.message : String(error);
+        assert.match(text, /found no live session for/);
+        assert.match(text, expected);
+        assert.match(text, /Nothing was sent\./);
+        assert.ok(text.includes(`Read as a pid, ${process.ppid} is `));
+        assert.doesNotMatch(text, /is never listed/);
+        assert.doesNotMatch(text, /token|secret/);
+        return true;
+      },
+    );
+    assert.deepEqual(probed, [process.ppid]);
+  });
+}
+
+test("send to a pid with no process says so without probing it", async (t) => {
+  const root = temporaryRoot();
+  const probed: number[] = [];
+  const alice = harness(
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "Alice",
+    root,
+    process.pid,
+    (options) =>
+      createTouchtoneExtension({
+        ...options,
+        processName(pid) {
+          probed.push(pid);
+          return "pi";
+        },
+      }),
+  );
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  await assert.rejects(
+    alice.tool({ action: "send", to: "99999999", message: "hello" }),
+    /found no live session for "99999999"\. Read as a pid, 99999999 names no running process\. Nothing was sent\./,
+  );
+  assert.deepEqual(probed, []);
+});
+
+test("the default probe recognizes a running pi process by name", async (t) => {
+  const { spawn, spawnSync } = await import("node:child_process");
+  if (spawnSync("ps", ["-o", "comm=", "-p", String(process.pid)]).status !== 0)
+    return t.skip("ps is unavailable");
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      'process.title = "pi"; console.log("ready"); setInterval(() => {}, 1000);',
+    ],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  t.after(() => child.kill());
+  await new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.once("data", () => resolve());
+  });
+  assert.ok(child.pid);
+
+  await assert.rejects(
+    alice.tool({ action: "send", to: String(child.pid), message: "hello" }),
+    /is a running pi process that has not registered in this touchtone store/,
+  );
+  await assert.rejects(
+    alice.tool({
+      action: "send",
+      to: String(process.ppid),
+      message: "hello",
+    }),
+    /does not look like a pi session\.|if it is a pi session/,
+  );
+});
+
+test("broadcast skips a silent session and reports it", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  const bob = harness("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Bob", root);
+  t.after(async () => {
+    await alice.event("session_shutdown");
+    await bob.event("session_shutdown");
+  });
+  await alice.event("session_start");
+  await bob.event("session_start");
+  const store = new TouchtoneStore({ root });
+  const shared = path.join(os.tmpdir(), "Bob");
+  registerSilent(store, { cwd: shared });
+
+  const result = await alice.tool({
+    action: "broadcast",
+    selectors: [shared],
+    message: "standup",
+  });
+  const text = result.content[0].text;
+  assert.match(text, /delivered to 1\/1 sessions/);
+  assert.match(
+    text,
+    /Not listening \(skipped\):\n- Carol \(cccccccc-cccc-cccc-cccc-cccccccccccc\) - silent for 2m/,
+  );
+  const outcome = (
+    result.details as {
+      broadcast: { notListening?: { session: TouchtoneSession }[] };
+    }
+  ).broadcast;
+  assert.deepEqual(
+    outcome.notListening?.map(({ session }) => session.sessionId),
+    [SILENT_ID],
+  );
+  assert.deepEqual(inboxFiles(store, SILENT_ID), []);
+  const rendered = stripTerminalSequences(
+    alice
+      .renderToolResult(
+        result,
+        { action: "broadcast", selectors: [shared], message: "standup" },
+        true,
+      )
+      .render(120)
+      .join("\n"),
+  );
+  assert.match(rendered, /Not listening \(skipped\):/);
+  assert.match(rendered, /Carol \(cccccccc-cccc-cccc-cccc-cccccccccccc\)/);
+
+  await assert.rejects(
+    alice.tool({
+      action: "broadcast",
+      selectors: ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", SILENT_ID],
+      message: "standup",
+    }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(
+        message,
+        /No live sessions matched: cccccccc-cccc-cccc-cccc-cccccccccccc\./,
+      );
+      assert.match(message, /registered but not listening: silent for 2m/);
+      assert.match(message, /Nothing was sent\./);
+      return true;
+    },
+  );
+  // The rejected broadcast reached nobody, Bob included: a second message
+  // would be consumed within a few polls and counted here.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(
+    inboxFiles(store, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+    [],
+  );
+  assert.equal(
+    bob.delivered.flatMap(
+      ({ message }) =>
+        (message.details as { messages: TouchtoneMessage[] }).messages,
+    ).length,
+    1,
+  );
+});
+
+test("list shows silent sessions apart from the live roster", async (t) => {
+  const root = temporaryRoot();
+  const alice = harness("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Alice", root);
+  t.after(async () => alice.event("session_shutdown"));
+  await alice.event("session_start");
+  const store = new TouchtoneStore({ root });
+  registerSilent(store);
+
+  const full = await alice.tool({ action: "list" });
+  assert.match(full.content[0].text, /^📒 Phonebook · 1 session:\n/);
+  assert.match(
+    full.content[0].text,
+    /\nNot listening \(registered, but a send to these fails\):\n- cccccccc-cccc-cccc-cccc-cccccccccccc - Carol - pid \d+ - silent for 2m$/,
+  );
+  assert.deepEqual(
+    (full.details as { sessions: TouchtoneSession[] }).sessions.map(
+      ({ sessionId }) => sessionId,
+    ),
+    ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+  );
+  const expanded = stripTerminalSequences(
+    alice
+      .renderToolResult(full, { action: "list" }, true)
+      .render(160)
+      .join("\n"),
+  );
+  assert.match(expanded, /Not listening/);
+  assert.match(expanded, /Carol/);
+  const collapsed = stripTerminalSequences(
+    alice
+      .renderToolResult(full, { action: "list" }, false)
+      .render(160)
+      .join("\n"),
+  );
+  assert.match(collapsed, /📒 Phonebook · 1 session · 1 not listening/);
+
+  const filtered = await alice.tool({ action: "list", to: "Carol" });
+  assert.match(filtered.content[0].text, /No live session matched: "Carol"/);
+  assert.match(
+    filtered.content[0].text,
+    /"Carol" matches cccccccc-cccc-cccc-cccc-cccccccccccc \(Carol\), which is registered but not listening: silent for 2m/,
+  );
+  assert.doesNotMatch(filtered.content[0].text, /\nNot listening \(/);
+  // The terminal view draws from details, so the cause has to travel there.
+  const filteredExpanded = stripTerminalSequences(
+    alice
+      .renderToolResult(filtered, { action: "list", to: "Carol" }, true)
+      .render(200)
+      .join("\n"),
+  );
+  assert.match(filteredExpanded, /No live session matched: "Carol"/);
+  assert.match(
+    filteredExpanded,
+    /which is registered but not listening: silent for 2m/,
+  );
+  const filteredCollapsed = stripTerminalSequences(
+    alice
+      .renderToolResult(filtered, { action: "list", to: "Carol" }, false)
+      .render(200)
+      .join("\n"),
+  );
+  assert.equal(filteredCollapsed, "📒 Phonebook · 0 sessions · 1 unmatched");
 });
