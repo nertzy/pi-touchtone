@@ -1,5 +1,8 @@
 # 📞 Touchtone
 
+[![CI](https://github.com/nertzy/pi-touchtone/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nertzy/pi-touchtone/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/pi-touchtone)](https://www.npmjs.com/package/pi-touchtone)
+
 Small, local session messaging for [Pi](https://github.com/earendil-works/pi).
 Find another running agent, send it a message, and keep working—without a broker
 or blocking question-and-answer protocol.
