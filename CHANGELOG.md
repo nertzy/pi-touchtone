@@ -4,6 +4,8 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
 ### Added
 
 - Added a heartbeat: a session refreshes its roster entry every five seconds,
