@@ -4,6 +4,25 @@ Notable changes to `pi-touchtone` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added a heartbeat: a session refreshes its roster entry every five seconds,
+  and one that stops for 30 seconds while its PID stays alive is no longer
+  treated as live. `send` to it fails without writing and names the session,
+  `broadcast` skips it and reports it, and `list` shows it under a separate
+  "Not listening" heading. Entries from earlier versions promise no heartbeat
+  and stay live for as long as their PID is.
+- Added the cause to a `send`, `broadcast`, or `list` locator that matches no
+  live session: a session that stopped listening, a PID with no process, another
+  program's PID, or a running pi session that never registered because it
+  runs without the extension (for example, started with `--no-extensions`).
+
+### Changed
+
+- Changed `send` to a session whose process is suspended, or that has not run
+  since the machine woke: it now fails without writing instead of queuing the
+  message for delivery on resume. Retry once the session runs again.
+
 ## [0.5.1] - 2026-11-16
 
 ### Fixed

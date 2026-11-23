@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -40,6 +41,22 @@ const DEFAULT_ROOT = path.join(
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 const PUBLISHER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const MAX_SIDECAR_BYTES = 64 * 1024;
+/** How often a listening session refreshes its roster entry. */
+export const HEARTBEAT_MS = 5000;
+/** Missed beats before a session that promised a heartbeat counts as silent. */
+const SILENT_AFTER_BEATS = 6;
+const PID_RE = /^[1-9]\d{0,9}$/;
+/**
+ * A whole process title that is a plain name, or an absolute path of plain
+ * segments ending in one; group 1 is the name. A free-text title is judged
+ * whole, so its last path segment is never mistaken for a name.
+ */
+const PROCESS_NAME_RE = /^(?:\/(?:[\w.+@-]+\/)*)?([\w.+-]{1,32})$/;
+/** Process titles pi gives itself: the TUI and its RPC entry point. */
+const PI_PROCESS_RE = /^pi(-rpc)?$/;
+const UNLISTED_HINT =
+  "A pi session that runs without the touchtone extension is never listed and cannot receive messages.";
+
 const CORE_FIELD_NAMES = new Set([
   "sessionId",
   "sessionName",
@@ -237,6 +254,12 @@ export interface TouchtoneSession {
   handles?: Record<string, string>;
   launch?: Record<string, string>;
   parentSessionId?: string;
+  /**
+   * Roster entries only: the session refreshes its entry's modification time
+   * at least this often while it listens. An entry without it is live for as
+   * long as its pid is.
+   */
+  heartbeatMs?: number;
   updatedAt: string;
 }
 
@@ -273,12 +296,19 @@ export interface BroadcastDetails {
   delivered: number;
   failed?: { sessionId: string; error: string }[];
   indeterminate?: { sessionId: string; error: string }[];
+  /** Matched sessions skipped because they stopped listening. */
+  notListening?: SilentEntry[];
 }
 
 export interface PhonebookEntry {
   session: TouchtoneSession;
   metadata: Record<string, string[]>;
   selectors: string[];
+}
+
+/** A registered session whose pid is alive but whose heartbeat stopped. */
+export interface SilentEntry extends PhonebookEntry {
+  silentMs: number;
 }
 
 export interface TouchtonePaths {
@@ -293,6 +323,9 @@ export interface TouchtoneOptions {
   root?: string;
   pid?: number;
   pollMs?: number;
+  heartbeatMs?: number;
+  /** Names the program running as a pid; defaults to asking `ps`. */
+  processName?: (pid: number) => string | undefined;
 }
 
 export function getTouchtonePaths(root = resolveStoreRoot()): TouchtonePaths {
@@ -398,6 +431,35 @@ function pidAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * The process name, never the command line, which can carry secrets. Some
+ * platforms report a title the process chose for itself, so a caller repeats
+ * it only when it is plain.
+ */
+function psProcessName(pid: number): string | undefined {
+  try {
+    return execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 172_800) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
+}
+
+function silentFor(entry: SilentEntry): string {
+  return `silent for ${formatDuration(entry.silentMs)}`;
 }
 
 function ensurePrivateDirectory(directory: string): void {
@@ -520,6 +582,14 @@ function isSession(value: unknown): value is TouchtoneSession {
     !record.parentSessionId.trim()
   )
     delete record.parentSessionId;
+  if (
+    !(
+      typeof record.heartbeatMs === "number" &&
+      Number.isFinite(record.heartbeatMs) &&
+      record.heartbeatMs > 0
+    )
+  )
+    delete record.heartbeatMs;
   return true;
 }
 
@@ -587,9 +657,11 @@ export function sessionSelectors(
 export class TouchtoneStore {
   readonly paths: TouchtonePaths;
   private readonly handedOff = new Set<string>();
+  private readonly processName: (pid: number) => string | undefined;
 
-  constructor(options: Pick<TouchtoneOptions, "root"> = {}) {
+  constructor(options: Pick<TouchtoneOptions, "root" | "processName"> = {}) {
     this.paths = getTouchtonePaths(resolveStoreRoot(options.root));
+    this.processName = options.processName ?? psProcessName;
   }
 
   initialize(sessionId?: string): void {
@@ -648,39 +720,56 @@ export class TouchtoneStore {
   }
 
   phonebook(): PhonebookEntry[] {
-    return this.liveSessions().map((session) => {
-      const metadata: Record<string, string[]> = {};
-      let files: string[] = [];
+    return this.directory().live;
+  }
+
+  /**
+   * Live and silent sessions from one read of the roster, so an operation
+   * that needs both never sees a session in both lists or in neither.
+   */
+  directory(): { live: PhonebookEntry[]; silent: SilentEntry[] } {
+    const live: PhonebookEntry[] = [];
+    const silent: SilentEntry[] = [];
+    for (const { session, silentMs } of this.roster()) {
+      const entry = this.entry(session);
+      if (silentMs === undefined) live.push(entry);
+      else silent.push({ ...entry, silentMs });
+    }
+    return { live, silent };
+  }
+
+  private entry(session: TouchtoneSession): PhonebookEntry {
+    const metadata: Record<string, string[]> = {};
+    let files: string[] = [];
+    try {
+      files = fs
+        .readdirSync(this.metadataDirectory(session.sessionId))
+        .filter((name) => name.endsWith(".json") && !name.startsWith("."))
+        .sort();
+    } catch {
+      // A missing metadata directory contributes nothing.
+    }
+    for (const name of files) {
+      const file = path.join(this.metadataDirectory(session.sessionId), name);
       try {
-        files = fs
-          .readdirSync(this.metadataDirectory(session.sessionId))
-          .filter((name) => name.endsWith(".json") && !name.startsWith("."))
-          .sort();
-      } catch {
-        // A missing metadata directory contributes nothing.
-      }
-      for (const name of files) {
-        const file = path.join(this.metadataDirectory(session.sessionId), name);
-        try {
-          if (fs.statSync(file).size > MAX_SIDECAR_BYTES) continue;
-          const contents = readBoundedSidecar(file);
-          if (contents === undefined) continue;
-          const record = metadataValues(JSON.parse(contents));
-          if (!record) continue;
-          for (const [key, values] of Object.entries(record)) {
-            if (CORE_FIELD_NAMES.has(key) || key in metadata) continue;
-            metadata[key] = values;
-          }
-        } catch {
-          // A malformed or vanished sidecar contributes nothing.
+        if (fs.statSync(file).size > MAX_SIDECAR_BYTES) continue;
+        const contents = readBoundedSidecar(file);
+        if (contents === undefined) continue;
+        const record = metadataValues(JSON.parse(contents));
+        if (!record) continue;
+        for (const [key, values] of Object.entries(record)) {
+          if (CORE_FIELD_NAMES.has(key) || key in metadata) continue;
+          metadata[key] = values;
         }
+      } catch {
+        // A malformed or vanished sidecar contributes nothing.
       }
-      return {
-        session,
-        metadata,
-        selectors: sessionSelectors(session, metadata),
-      };
-    });
+    }
+    return {
+      session,
+      metadata,
+      selectors: sessionSelectors(session, metadata),
+    };
   }
 
   register(record: TouchtoneSession): void {
@@ -697,9 +786,82 @@ export class TouchtoneStore {
     }
   }
 
+  /** Refreshes the session's roster entry; false when it has none. */
+  heartbeat(sessionId: string): boolean {
+    const now = new Date();
+    try {
+      fs.utimesSync(this.rosterFile(sessionId), now, now);
+      return true;
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return false;
+      throw error;
+    }
+  }
+
   liveSessions(): TouchtoneSession[] {
+    return this.roster()
+      .filter(({ silentMs }) => silentMs === undefined)
+      .map(({ session }) => session);
+  }
+
+  /**
+   * Registered sessions that promised a heartbeat and stopped beating while
+   * their pid stayed alive: a crash followed by pid reuse, or a suspended or
+   * hung process. They cannot be reached, so the phonebook omits them.
+   */
+  silentSessions(): SilentEntry[] {
+    return this.directory().silent;
+  }
+
+  /**
+   * Why locators that matched no live session missed, where that is known.
+   * Pass the silent sessions from the directory the locators missed in.
+   */
+  missReasons(
+    locators: string[],
+    silent: SilentEntry[] = this.silentSessions(),
+  ): string[] {
+    const reasons: string[] = [];
+    for (const locator of locators) {
+      const hits = silent.filter((entry) => entry.selectors.includes(locator));
+      const reason =
+        hits.length > 0
+          ? `${JSON.stringify(locator)} matches ${hits
+              .map((entry) => {
+                const name = entry.session.sessionName?.trim();
+                return `${entry.session.sessionId}${name ? ` (${name})` : ""}, which is registered but not listening: ${silentFor(entry)}`;
+              })
+              .join("; and ")}.`
+          : this.pidReason(locator);
+      if (reason) reasons.push(reason);
+    }
+    return reasons;
+  }
+
+  private pidReason(locator: string): string | undefined {
+    if (!PID_RE.test(locator)) return undefined;
+    const pid = Number(locator);
+    // A numeric locator may have been meant as a terminal handle instead.
+    if (!pidAlive(pid))
+      return `Read as a pid, ${pid} names no running process.`;
+    let name: string | undefined;
+    try {
+      name = this.processName(pid);
+    } catch {
+      // An unnamed process still gets the general explanation.
+    }
+    name = PROCESS_NAME_RE.exec(name?.trim() ?? "")?.[1];
+    if (name && PI_PROCESS_RE.test(name))
+      return `Read as a pid, ${pid} is a running pi process that has not registered in this touchtone store: it most likely runs without the touchtone extension (for example, started with --no-extensions) and cannot receive messages.`;
+    if (name)
+      return `Read as a pid, ${pid} is a running process (${name}) that does not look like a pi session.`;
+    return `Read as a pid, ${pid} is a running process that has not registered in this touchtone store; if it is a pi session, it most likely runs without the touchtone extension and cannot receive messages.`;
+  }
+
+  private roster(): { session: TouchtoneSession; silentMs?: number }[] {
     ensurePrivateDirectory(this.paths.sessions);
-    const sessions: TouchtoneSession[] = [];
+    const now = Date.now();
+    const sessions: { session: TouchtoneSession; silentMs?: number }[] = [];
     for (const entry of fs.readdirSync(this.paths.sessions, {
       withFileTypes: true,
     })) {
@@ -711,13 +873,20 @@ export class TouchtoneStore {
           fs.unlinkSync(file);
           continue;
         }
-        sessions.push(record);
+        // An entry that promises no heartbeat is live for as long as its pid.
+        const allowance = (record.heartbeatMs ?? Infinity) * SILENT_AFTER_BEATS;
+        const silentMs = now - fs.statSync(file).mtimeMs;
+        sessions.push(
+          silentMs > allowance
+            ? { session: record, silentMs }
+            : { session: record },
+        );
       } catch {
         // A malformed file is not a session and cannot safely be addressed.
       }
     }
     return sessions.sort(
-      (left, right) =>
+      ({ session: left }, { session: right }) =>
         (left.sessionName ?? "").localeCompare(right.sessionName ?? "") ||
         left.sessionId.localeCompare(right.sessionId),
     );
@@ -761,7 +930,7 @@ export class TouchtoneStore {
     }
 
     const uniqueSelectors = [...new Set(selectors)];
-    const entries = this.phonebook();
+    const { live: entries, silent } = this.directory();
     const matchedBy: Record<string, number> = {};
     const matched = new Map<string, TouchtoneSession>();
 
@@ -777,10 +946,15 @@ export class TouchtoneStore {
       (selector) => matchedBy[selector] === 0,
     );
     if (misses.length > 0) {
+      const reasons =
+        this.missReasons(misses, silent).join(" ") || UNLISTED_HINT;
       throw new Error(
-        `No live sessions matched: ${misses.join(", ")}. Run touchtone list again. Nothing was sent.`,
+        `No live sessions matched: ${misses.join(", ")}. ${reasons} Run touchtone list again. Nothing was sent.`,
       );
     }
+    const notListening = silent.filter((entry) =>
+      uniqueSelectors.some((selector) => entry.selectors.includes(selector)),
+    );
 
     const excludedSelf = matched.delete(sender.sessionId);
     const recipients = [...matched.values()];
@@ -829,6 +1003,7 @@ export class TouchtoneStore {
       delivered,
       failed,
       ...(indeterminate.length > 0 ? { indeterminate } : {}),
+      ...(notListening.length > 0 ? { notListening } : {}),
     };
   }
 
@@ -922,6 +1097,9 @@ interface TouchtoneDetails {
   entries?: PhonebookEntry[];
   parentAnnotations?: Record<string, string>;
   parentLinks?: Record<string, ParentLink>;
+  notListening?: SilentEntry[];
+  /** Locators a filtered list matched nothing for, with the stated cause. */
+  unmatched?: { locators: string[]; note: string };
   recipient?: TouchtoneSession;
   messageId?: string;
   broadcast?: BroadcastDetails;
@@ -941,8 +1119,21 @@ function wrapToWidth(text: string, width: number): string[] {
   );
 }
 
-function phonebookSummary(count: number): string {
-  return `📒 Phonebook · ${count} ${count === 1 ? "session" : "sessions"}`;
+function phonebookSummary(count: number, notListening = 0): string {
+  return `📒 Phonebook · ${count} ${count === 1 ? "session" : "sessions"}${notListening > 0 ? ` · ${notListening} not listening` : ""}`;
+}
+
+const NOT_LISTENING_HEADING =
+  "Not listening (registered, but a send to these fails):";
+
+function notListeningLine(entry: SilentEntry): string {
+  const name = entry.session.sessionName?.trim() || "(unnamed session)";
+  return `${entry.session.sessionId} - ${name} - pid ${entry.session.pid} - ${silentFor(entry)}`;
+}
+
+function skippedLine(entry: SilentEntry): string {
+  const name = entry.session.sessionName?.trim() || "unnamed session";
+  return `${name} (${entry.session.sessionId}) - ${silentFor(entry)}`;
 }
 
 function rosterTable(
@@ -951,12 +1142,13 @@ function rosterTable(
   styleDivider: (text: string) => string,
   parentAnnotations?: Record<string, string>,
   parentLinks?: Record<string, ParentLink>,
+  notListening: SilentEntry[] = [],
 ): Component {
   return {
     invalidate() {},
     render(width: number): string[] {
       const safeWidth = Math.max(1, width);
-      const summary = phonebookSummary(sessions.length);
+      const summary = phonebookSummary(sessions.length, notListening.length);
       if (safeWidth < 60) {
         return [truncateToWidth(summary, safeWidth, "")];
       }
@@ -1020,6 +1212,16 @@ function rosterTable(
             ),
           );
       }
+      if (notListening.length > 0) {
+        lines.push(styleHeader(NOT_LISTENING_HEADING));
+        for (const entry of notListening)
+          lines.push(
+            ...wrapToWidth(
+              stripTerminalSequences(notListeningLine(entry)),
+              safeWidth,
+            ),
+          );
+      }
       return lines;
     },
   };
@@ -1029,12 +1231,24 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
   const store = new TouchtoneStore(options);
   const pid = options.pid ?? process.pid;
   const pollMs = options.pollMs ?? 1000;
+  const wantedBeatMs =
+    options.heartbeatMs !== undefined &&
+    Number.isFinite(options.heartbeatMs) &&
+    options.heartbeatMs > 0
+      ? options.heartbeatMs
+      : HEARTBEAT_MS;
+  // The heartbeat rides the inbox poll rather than a timer of its own, so the
+  // promised interval is a whole number of polls.
+  const pollsPerBeat =
+    pollMs > 0 ? Math.max(1, Math.round(wantedBeatMs / pollMs)) : 1;
+  const heartbeatMs = pollMs > 0 ? pollsPerBeat * pollMs : wantedBeatMs;
 
   return function touchtoneExtension(pi: ExtensionAPI): void {
     let context: ExtensionContext | undefined;
     let sessionId: string | undefined;
     let watcher: fs.FSWatcher | undefined;
     let poller: ReturnType<typeof setInterval> | undefined;
+    let pollsSinceBeat = 0;
     let consuming = false;
     let awaitingTurnEnd = false;
     const unopened = new Set<string>();
@@ -1148,7 +1362,25 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       };
     };
 
-    const register = (): void => store.register(self());
+    // The promise lives in the roster entry only, never in a sender block.
+    const register = (): void => store.register({ ...self(), heartbeatMs });
+
+    // Proof to senders that this session still listens. A roster entry that
+    // another process removed, or whose timestamp cannot be set, is published
+    // again: the rename refreshes it.
+    const beat = (): void => {
+      if (!sessionId) return;
+      try {
+        if (store.heartbeat(sessionId)) return;
+      } catch {
+        // Publishing again is the fallback.
+      }
+      try {
+        register();
+      } catch {
+        // The next beat retries; senders see silence only after several.
+      }
+    };
 
     const batchContent = (messages: TouchtoneMessage[]): string => {
       if (messages.length === 1) {
@@ -1236,6 +1468,17 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       watcher = undefined;
       if (poller) clearInterval(poller);
       poller = undefined;
+      pollsSinceBeat = 0;
+    };
+
+    // The beat comes first so that a failed sweep cannot starve it.
+    const poll = (): void => {
+      pollsSinceBeat += 1;
+      if (pollsSinceBeat >= pollsPerBeat) {
+        pollsSinceBeat = 0;
+        beat();
+      }
+      consume();
     };
 
     pi.registerMessageRenderer<TouchtoneInboxDetails>(
@@ -1398,10 +1641,15 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         }
         if (renderContext.args.action === "list" && result.details?.sessions) {
           const sessions = result.details.sessions;
+          const unmatched = result.details.unmatched;
           if (!renderOptions.expanded) {
             const summary = theme.fg(
               "toolOutput",
-              phonebookSummary(sessions.length),
+              phonebookSummary(
+                sessions.length,
+                result.details.notListening?.length,
+              ) +
+                (unmatched ? ` · ${unmatched.locators.length} unmatched` : ""),
             );
             return {
               invalidate() {},
@@ -1410,13 +1658,26 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               ],
             };
           }
-          return rosterTable(
+          const table = rosterTable(
             sessions,
             (value) => theme.fg("muted", value),
             (value) => theme.fg("dim", value),
             result.details.parentAnnotations,
             result.details.parentLinks,
+            result.details.notListening,
           );
+          if (!unmatched) return table;
+          // The table draws from details, so a filter's misses follow it here.
+          return {
+            invalidate() {},
+            render: (width: number) => [
+              ...table.render(width),
+              ...wrapToWidth(
+                stripTerminalSequences(unmatched.note),
+                Math.max(1, width),
+              ).map((line) => theme.fg("muted", line)),
+            ],
+          };
         }
         if (
           renderContext.args.action === "broadcast" &&
@@ -1454,6 +1715,15 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             summary.push(
               `Indeterminate (call published, post-commit step failed):\n${outcome.indeterminate
                 .map(({ sessionId, error }) => `  ${sessionId}: ${error}`)
+                .join("\n")}`,
+            );
+          }
+          if (outcome.notListening?.length) {
+            summary.push(
+              `Not listening (skipped):\n${outcome.notListening
+                .map(
+                  (entry) => `  ${stripTerminalSequences(skippedLine(entry))}`,
+                )
                 .join("\n")}`,
             );
           }
@@ -1501,7 +1771,9 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
         if (params.action === "list") {
           // `to`/`selectors` optionally filter the roster by the same
           // locators send/broadcast resolve; `message` is ignored.
-          const entries = tryStore("list", () => store.phonebook());
+          const { live: entries, silent } = tryStore("list", () =>
+            store.directory(),
+          );
           const byId = new Map(
             entries.map(({ session }) => [session.sessionId, session]),
           );
@@ -1550,8 +1822,20 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           let text = lines.length
             ? `${heading}:\n${lines.join("\n")}`
             : heading;
-          if (misses.length > 0)
-            text += `\nNo live session matched: ${misses.map((locator) => JSON.stringify(locator)).join(", ")} — run list without locators for the full roster.`;
+          let unmatched: TouchtoneDetails["unmatched"];
+          if (misses.length > 0) {
+            let note = `No live session matched: ${misses.map((locator) => JSON.stringify(locator)).join(", ")} — run list without locators for the full roster.`;
+            const reasons = tryStore("list", () =>
+              store.missReasons(misses, silent),
+            );
+            if (reasons.length > 0) note += ` ${reasons.join(" ")}`;
+            text += `\n${note}`;
+            unmatched = { locators: misses, note };
+          }
+          // An unfiltered list also names the sessions a send cannot reach.
+          const notListening = locators.length === 0 ? silent : [];
+          if (notListening.length > 0)
+            text += `\n${NOT_LISTENING_HEADING}\n${notListening.map((entry) => `- ${notListeningLine(entry)}`).join("\n")}`;
           return {
             content: [{ type: "text" as const, text }],
             details: {
@@ -1559,6 +1843,8 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               entries: matched,
               parentAnnotations,
               parentLinks,
+              ...(notListening.length > 0 ? { notListening } : {}),
+              ...(unmatched ? { unmatched } : {}),
             },
           };
         }
@@ -1612,6 +1898,10 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               `Indeterminate (call published, post-commit step failed):\n${indeterminateLines.join("\n")}`,
             );
           }
+          if (outcome.notListening?.length)
+            parts.push(
+              `Not listening (skipped):\n${outcome.notListening.map((entry) => `- ${skippedLine(entry)}`).join("\n")}`,
+            );
           return {
             content: [{ type: "text" as const, text: parts.join("\n") }],
             details: { broadcast: outcome },
@@ -1629,7 +1919,9 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
             "send",
             'touchtone send needs a destination locator: pass the recipient in "to" (one locator) or "selectors" (an array). A locator is anything a session advertises — session id, name, cwd, pid, terminal handle, or ticket id. Run touchtone list to see live sessions and their copyable selectors.',
           );
-        const phonebook = tryStore("send", () => store.phonebook());
+        const { live: phonebook, silent } = tryStore("send", () =>
+          store.directory(),
+        );
         const resolved = new Map<
           string,
           { session: TouchtoneSession; via: string[] }
@@ -1653,10 +1945,13 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
               });
           }
         }
+        const missReasons = tryStore("send", () =>
+          store.missReasons(misses, silent),
+        ).join(" ");
         if (resolved.size === 0)
           throw usageError(
             "send",
-            `touchtone send found no live session for ${locators.map((locator) => JSON.stringify(locator)).join(", ")}. Run touchtone list to see live session ids and selectors.`,
+            `touchtone send found no live session for ${locators.map((locator) => JSON.stringify(locator)).join(", ")}. ${missReasons || UNLISTED_HINT} Nothing was sent. Run touchtone list to see live session ids and selectors.`,
           );
         if (resolved.size > 1) {
           const details = [...resolved.values()]
@@ -1678,7 +1973,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
           recipient.sessionName?.trim() || "unnamed session";
         const ignored =
           misses.length > 0
-            ? ` Ignored ${misses.length === 1 ? "locator" : "locators"} that matched no live session: ${misses.map((locator) => JSON.stringify(locator)).join(", ")}.`
+            ? ` Ignored ${misses.length === 1 ? "locator" : "locators"} that matched no live session: ${misses.map((locator) => JSON.stringify(locator)).join(", ")}.${missReasons ? ` ${missReasons}` : ""}`
             : "";
         return {
           content: [
@@ -1772,7 +2067,7 @@ export function createTouchtoneExtension(options: TouchtoneOptions = {}) {
       updateOnDeck();
       consume();
       watcher = fs.watch(store.inboxDirectory(sessionId), consume);
-      poller = setInterval(consume, pollMs);
+      poller = setInterval(poll, pollMs);
       poller.unref?.();
     });
 
